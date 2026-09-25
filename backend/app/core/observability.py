@@ -41,7 +41,9 @@ class TraceStore:
     def increment(self, name: str, amount: int = 1) -> None:
         self.counts[name] += amount
 
-    def observe(self, name: str, value: float, limit: int = 1000) -> None:
+    def observe(self, name: str, value: float | None, limit: int = 1000) -> None:
+        if value is None:
+            return
         values = self.measurements.setdefault(name, deque(maxlen=limit))
         values.append(value)
 

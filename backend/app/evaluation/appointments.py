@@ -52,7 +52,7 @@ def run_appointment_evaluation() -> dict[str, object]:
         return value
 
     request = AppointmentRequest(
-        property_id="DEMO-001",
+        property_id="PROP-001",
         employee="Ayesha Khan",
         starts_at=valid_slot,
         client_name="Ali Khan",
@@ -70,7 +70,7 @@ def run_appointment_evaluation() -> dict[str, object]:
         "book-unavailable",
         False,
         lambda: service.book(
-            request.model_copy(update={"property_id": "DEMO-003", "idempotency_key": uuid4()})
+            request.model_copy(update={"property_id": "PROP-003", "idempotency_key": uuid4()})
         ),
     )
     check(
@@ -93,7 +93,7 @@ def run_appointment_evaluation() -> dict[str, object]:
         "book-busy-slot",
         False,
         lambda: service.book(
-            request.model_copy(update={"property_id": "DEMO-004", "idempotency_key": uuid4()})
+            request.model_copy(update={"property_id": "PROP-004", "idempotency_key": uuid4()})
         ),
     )
 

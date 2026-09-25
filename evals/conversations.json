@@ -24,7 +24,7 @@
   {"id":"seller","input":"Mujhe apna ghar sell karna hai.","expected_kind":"handoff"},
   {"id":"seller-urdu","input":"Mera plot bechna hai, consultant se baat karwa dein.","expected_kind":"handoff"},
   {"id":"seller-listing","input":"I want to sell my property and create a listing.","expected_kind":"handoff"},
-  {"id":"booking-1","input":"DEMO-001 ka visit book karna hai.","expected_kind":"book"},
+  {"id":"booking-1","input":"PROP-001 ka visit book karna hai.","expected_kind":"book"},
   {"id":"booking-2","input":"I want to book an appointment.","expected_kind":"book"},
   {"id":"booking-3","input":"Property visit schedule kar dein.","expected_kind":"book"},
   {"id":"booking-4","input":"Ayesha ke saath booking karni hai.","expected_kind":"book"},

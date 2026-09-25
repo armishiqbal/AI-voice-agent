@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import pytest
-
 from app.agents.graph import EstateAgent
 from app.domain.fixtures import demo_properties
 from app.domain.legal import verify_legal_status
 from app.domain.taxes import calculate_property_taxes, explain_tax_query
 from app.domain.units import explain_land_conversion, parse_land_size
-from app.repositories.properties import SqlPropertyRepository
 
 
 def test_parse_land_size_conversions() -> None:

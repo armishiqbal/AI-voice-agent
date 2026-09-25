@@ -4,7 +4,7 @@
 
 - Import CSV/JSON with `python scripts/data/import_inventory.py path.csv --source crm-export-v1`.
 - Ingest brochures/FAQs with `python scripts/data/ingest_knowledge.py path.pdf --source brochure-v1
-  --property-id DEMO-001` after configuring OpenAI and Pinecone.
+  --property-id PROP-001` after configuring OpenAI and Pinecone.
 - Inspect import validation errors and provenance before treating records as authoritative.
 - Outside development, send `X-Admin-Api-Key: $ADMIN_API_KEY` for inventory imports, knowledge
   ingestion, metrics, evaluation, outbox, and audit endpoints. The consented lead form is public

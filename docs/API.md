@@ -25,7 +25,7 @@
 - `POST /v1/properties/import-file?filename=inventory.csv&source=crm-export-v1` — raw CSV/JSON
   upload with row-level validation; accepted and rejected rows are both recorded in the batch ledger.
 - `python scripts/data/import_inventory.py` — CSV/JSON importer with row-level validation errors.
-- `POST /v1/knowledge/ingest-file?filename=brochure.pdf&source=brochure-v1&property_id=DEMO-001`
+- `POST /v1/knowledge/ingest-file?filename=brochure.pdf&source=brochure-v1&property_id=PROP-001`
   — chunks a PDF/text brochure or FAQ and upserts it to Pinecone when configured; returns 503
   instead of pretending ingestion succeeded when the provider is absent.
 

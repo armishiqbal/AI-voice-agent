@@ -9,6 +9,12 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const protocol = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
 
+const vadSource = await readFile(new URL("../src/voiceVad.ts", import.meta.url), "utf8");
+const vadCompiled = ts.transpileModule(vadSource, {
+  compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const vadModule = await import(`data:text/javascript;base64,${Buffer.from(vadCompiled).toString("base64")}`);
+
 test("parseServerEvent validates known voice events", () => {
   assert.deepEqual(protocol.parseServerEvent(JSON.stringify({
     type: "state",
@@ -34,7 +40,7 @@ test("parseServerEvent validates known voice events", () => {
 
   assert.equal(protocol.parseServerEvent(JSON.stringify({
     type: "agent_response",
-    decision: { kind: "answer", spoken_text: "Assalam-o-Alaikum", property_ids: ["DEMO-001"] },
+    decision: { kind: "answer", spoken_text: "Assalam-o-Alaikum", property_ids: ["PROP-001"] },
   })).decision.spoken_text, "Assalam-o-Alaikum");
 });
 
@@ -81,19 +87,19 @@ test("parseServerEvent validates consent status and non-PII appointment outcomes
   })).ready, true);
   assert.deepEqual(protocol.parseServerEvent(JSON.stringify({
     type: "booking_slots",
-    property_id: "DEMO-001",
+    property_id: "PROP-001",
     slots: ["2026-09-23T10:00:00+05:00"],
   })).slots, ["2026-09-23T10:00:00+05:00"]);
   assert.equal(protocol.parseServerEvent(JSON.stringify({
     type: "booking_slots",
-    property_id: "DEMO-001",
+    property_id: "PROP-001",
     slots: ["a", "b", "c", "d"],
   })), null);
   assert.equal(protocol.parseServerEvent(JSON.stringify({
     type: "appointment_result",
     status: "test_booked",
     reference: "AES-0123456789",
-    property_id: "DEMO-001",
+    property_id: "PROP-001",
     starts_at: "2026-09-23T10:00:00+05:00",
   })).status, "test_booked");
 });
@@ -103,4 +109,24 @@ test("audioUplinkState stops capture before the browser send queue grows without
   assert.equal(protocol.audioUplinkState(1, protocol.AUDIO_UPLINK_HIGH_WATER_BYTES), "backpressured");
   assert.equal(protocol.audioUplinkState(1, -1), "backpressured");
   assert.equal(protocol.audioUplinkState(3, 0), "closed");
+});
+
+test("adaptive voice activity detection starts on quiet speech and ends after silence", () => {
+  const vad = new vadModule.VoiceActivityDetector();
+  assert.equal(vad.process(0.001, 256), null);
+  assert.equal(vad.process(0.006, 256), "speech_started");
+  assert.equal(vad.process(0.01, 256), null);
+  assert.equal(vad.process(0.001, 256), null);
+  assert.equal(vad.process(0.001, 256), null);
+  assert.equal(vad.process(0.001, 256), "speech_ended");
+});
+
+test("adaptive voice activity detection learns background noise and bounds long turns", () => {
+  const vad = new vadModule.VoiceActivityDetector(650, 1_000);
+  for (let index = 0; index < 12; index += 1) {
+    assert.equal(vad.process(0.006, 100), null);
+  }
+  assert.equal(vad.process(0.03, 100), "speech_started");
+  assert.equal(vad.process(0.03, 500), null);
+  assert.equal(vad.process(0.03, 500), "speech_ended");
 });

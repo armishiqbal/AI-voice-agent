@@ -98,7 +98,7 @@ class VoiceSessionService:
             if hostname in {"127.0.0.1", "::1", "localhost"}:
                 port_part = f":{parsed.port}" if parsed.port else ""
                 return f"{parsed.scheme}://127.0.0.1{port_part}"
-        except Exception:
+        except ValueError:
             pass
         return clean
 

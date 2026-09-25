@@ -48,7 +48,7 @@ def test_sql_property_repository_imports_and_filters() -> None:
     create_schema_for_local_development()
     repository = SqlPropertyRepository()
     repository.import_properties(demo_properties())
-    assert repository.get_available("DEMO-001") is not None
+    assert repository.get_available("PROP-001") is not None
     assert all(item.city == "Karachi" for item in repository.list()) is False
     Base.metadata.drop_all(bind=engine)
 
@@ -74,7 +74,7 @@ def test_sql_appointment_is_idempotent_and_writes_outbox() -> None:
     properties.import_properties(demo_properties())
     service = SqlAppointmentService(properties)
     request = AppointmentRequest(
-        property_id="DEMO-001",
+        property_id="PROP-001",
         employee="Ayesha Khan",
         starts_at=_future_pk_slot(),
         client_name="Ali",
@@ -121,7 +121,7 @@ def test_sql_appointment_rejects_wrong_employee_and_busy_slot() -> None:
     with pytest.raises(ValueError, match="assigned"):
         service.book(
             AppointmentRequest(
-                property_id="DEMO-001",
+                property_id="PROP-001",
                 employee="Wrong",
                 starts_at=starts_at,
                 client_name="Ali",
@@ -132,7 +132,7 @@ def test_sql_appointment_rejects_wrong_employee_and_busy_slot() -> None:
         )
     service.book(
         AppointmentRequest(
-            property_id="DEMO-001",
+            property_id="PROP-001",
             employee="Ayesha Khan",
             starts_at=starts_at,
             client_name="Ali",
@@ -144,7 +144,7 @@ def test_sql_appointment_rejects_wrong_employee_and_busy_slot() -> None:
     with pytest.raises(ValueError, match="already booked"):
         service.book(
             AppointmentRequest(
-                property_id="DEMO-004",
+                property_id="PROP-004",
                 employee="Ayesha Khan",
                 starts_at=starts_at,
                 client_name="Sara",
@@ -163,7 +163,7 @@ def test_sql_update_idempotency_does_not_duplicate_outbox_event() -> None:
     service = SqlAppointmentService(properties)
     appointment = service.book(
         AppointmentRequest(
-            property_id="DEMO-001",
+            property_id="PROP-001",
             employee="Ayesha Khan",
             starts_at=_future_pk_slot(),
             client_name="Ali",
@@ -193,7 +193,7 @@ def test_sql_reschedule_validates_slot_and_persists_transition() -> None:
     service = SqlAppointmentService(properties)
     appointment = service.book(
         AppointmentRequest(
-            property_id="DEMO-001",
+            property_id="PROP-001",
             employee="Ayesha Khan",
             starts_at=_future_pk_slot(),
             client_name="Ali",
@@ -255,7 +255,7 @@ def test_postgres_concurrent_bookings_cannot_claim_same_employee_slot() -> None:
             results = list(
                 executor.map(
                     lambda arguments: attempt(*arguments),
-                    [("DEMO-001", "Ali"), ("DEMO-004", "Sara")],
+                    [("PROP-001", "Ali"), ("PROP-004", "Sara")],
                 )
             )
 

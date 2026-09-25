@@ -65,7 +65,7 @@ def test_grounded_retriever_filters_rag_by_sql_selected_properties() -> None:
 
     selected = demo_properties()[:2]
     GroundedRetriever(Store()).context_for("payment plan", selected, top_k=3)
-    assert calls["metadata_filter"] == {"property_id": {"$in": ["DEMO-001", "DEMO-002"]}}
+    assert calls["metadata_filter"] == {"property_id": {"$in": ["PROP-001", "PROP-002"]}}
 
 
 def test_local_tts_registers_every_supported_language_without_loading_models() -> None:

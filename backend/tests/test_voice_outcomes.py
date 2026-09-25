@@ -23,8 +23,8 @@ async def test_completed_voice_call_outcome_is_pii_free_and_idempotent() -> None
         city="Karachi",
         area="DHA +1 415 555 0100 ali@example.com",
         budget=50_000_000,
-        selected_property_ids=["DEMO-001"],
-        retrieved_sources=["property:DEMO-001:demo-v1"],
+        selected_property_ids=["PROP-001"],
+        retrieved_sources=["property:PROP-001:v1.0"],
         tool_results={
             "budget_vs_listing": {
                 "below_list": True,

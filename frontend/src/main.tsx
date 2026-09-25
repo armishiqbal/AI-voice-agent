@@ -469,6 +469,18 @@ function App() {
             setActiveActionLabel("ACTION: AWAAZ IS SPEAKING");
           }
         }
+        if (event.type === "agent_unavailable") {
+          setVoicePhase("error");
+          setActiveActionLabel("AGENT COULD NOT FINISH — PLEASE REPEAT THAT");
+        }
+        if (event.type === "stt_unavailable") {
+          setVoicePhase("error");
+          setActiveActionLabel("SPEECH RECOGNITION UNAVAILABLE — CHECK VOICE READINESS");
+        }
+        if (event.type === "audio_unavailable") {
+          setAudioOutputUnavailable(true);
+          setActiveActionLabel("REPLY TEXT IS READY — SPOKEN AUDIO IS UNAVAILABLE");
+        }
         if (event.type === "appointment_result") {
           setAppointmentTone(event.status === "test_booked" ? "success" : "pending");
           const msg =
@@ -932,7 +944,7 @@ function App() {
           client_name: appointmentForm.client_name,
           contact_email: appointmentForm.contact_email,
           contact_phone: appointmentForm.contact_phone || null,
-          property_id: selectedPropertyId || "DEMO-001",
+          property_id: selectedPropertyId || "PROP-001",
           employee: propertyDetails[selectedPropertyId]?.assigned_employee || "Ayesha Khan",
           idempotency_key:
             typeof crypto !== "undefined" && crypto.randomUUID
@@ -1506,7 +1518,7 @@ function App() {
                     </option>
                   ))
                 ) : (
-                  <option value="DEMO-001">DEMO-001 — Clifton Sea View Luxury Apartment, Karachi</option>
+                  <option value="PROP-001">PROP-001 — Emaar Coral Towers Luxury 3-Bed Waterfront Apartment, Karachi</option>
                 )}
               </select>
             </div>

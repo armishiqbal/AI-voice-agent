@@ -67,7 +67,7 @@ def test_redacts_contact_data():
 def test_booking_requires_available_property_and_is_idempotent():
     service = AppointmentService(PropertyRepository())
     request = AppointmentRequest(
-        property_id="DEMO-001",
+        property_id="PROP-001",
         employee="Ayesha Khan",
         client_name="Ali",
         contact_email="ali@example.com",
@@ -83,7 +83,7 @@ def test_structured_answer_provider_cannot_escape_selected_property_or_sources()
         def query(self, text, metadata_filter, top_k):
             return [
                 RetrievedChunk(
-                    "brochure-1", "Verified payment plan", 0.9, {"property_id": "DEMO-001"}
+                    "brochure-1", "Verified payment plan", 0.9, {"property_id": "PROP-001"}
                 )
             ]
 
@@ -96,9 +96,9 @@ def test_structured_answer_provider_cannot_escape_selected_property_or_sources()
 
     agent = EstateAgent(PropertyRepository(), decision_provider=ForgedProvider())
     agent.retriever = GroundedRetriever(Store())
-    decision = agent.respond("answer", "DEMO-001 ka payment plan kya hai?")
+    decision = agent.respond("answer", "PROP-001 ka payment plan kya hai?")
     assert decision.kind == "answer"
-    assert decision.property_ids == ["DEMO-001"]
+    assert decision.property_ids == ["PROP-001"]
     assert "fake" not in decision.source_ids
 
 
@@ -146,7 +146,7 @@ def test_objection_is_acknowledged_without_inventing_a_claim() -> None:
 
 def test_property_detail_answer_includes_verified_local_services_when_requested() -> None:
     decision = EstateAgent(PropertyRepository()).respond(
-        "services", "DEMO-001 ke nearby schools aur hospitals bata dein"
+        "services", "PROP-001 ke nearby schools aur hospitals bata dein"
     )
     assert decision.kind == "answer"
     assert "Nearby schools" in decision.spoken_text

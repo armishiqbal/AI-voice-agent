@@ -22,7 +22,7 @@ def answer_prompt(
     context: list[str],
     history: list[str] | None = None,
 ) -> str:
-    hist_text = f"\nRecent dialogue:\n" + "\n".join(history[-6:]) if history else ""
+    hist_text = "\nRecent dialogue:\n" + "\n".join(history[-6:]) if history else ""
     return (
         f"{VOICE_SYSTEM_PROMPT}\n\nAnswer mode. Allowed property ID: {property_id}. "
         f"Allowed source IDs: {source_ids}. Retrieved context: {context}{hist_text}"
@@ -35,7 +35,7 @@ def recommendation_prompt(
     context: list[str],
     history: list[str] | None = None,
 ) -> str:
-    hist_text = f"\nRecent dialogue:\n" + "\n".join(history[-6:]) if history else ""
+    hist_text = "\nRecent dialogue:\n" + "\n".join(history[-6:]) if history else ""
     return (
         f"{VOICE_SYSTEM_PROMPT}\n\nRecommendation mode. Use only these available property IDs: "
         f"{property_ids}. Allowed source IDs: {source_ids}. Retrieved context: {context}{hist_text}"
@@ -47,9 +47,8 @@ def general_qa_prompt(
     history: list[str] | None = None,
 ) -> str:
     ctx_text = f"\nRetrieved real estate knowledge: {context}" if context else ""
-    hist_text = f"\nRecent dialogue:\n" + "\n".join(history[-6:]) if history else ""
+    hist_text = "\nRecent dialogue:\n" + "\n".join(history[-6:]) if history else ""
     return (
         f"{VOICE_SYSTEM_PROMPT}\n\nGeneral real-estate inquiry mode. Answer the caller's query "
         f"conversationally, helpfully, and with authentic Pakistani market context.{ctx_text}{hist_text}"
     )
-

@@ -71,7 +71,7 @@ def test_gmail_delivery_includes_client_details_without_raw_outbox_email(monkeyp
             "contact_email_ciphertext": encrypted,
             "contact_phone_ciphertext": phone_encrypted,
             "event_type": "appointment.rescheduled",
-            "property_id": "DEMO-001",
+            "property_id": "PROP-001",
             "starts_at": "2026-09-22T10:30:00+00:00",
             "employee": "Ayesha Khan",
         }
@@ -114,7 +114,7 @@ def test_calendar_delivery_contains_client_context(monkeypatch) -> None:
             "client_name": "Ali Khan",
             "contact_email_ciphertext": encrypted,
             "contact_phone_ciphertext": phone_encrypted,
-            "property_id": "DEMO-001",
+            "property_id": "PROP-001",
             "starts_at": "2026-09-22T10:30:00+00:00",
             "employee": "Ayesha Khan",
             "event_type": "appointment.booked",
@@ -137,7 +137,7 @@ async def test_instant_whatsapp_booking_handler() -> None:
 
     payload = {
         "reference": "AES-CONFIRM-99",
-        "property_id": "DEMO-001",
+        "property_id": "PROP-001",
         "employee": "Ayesha Khan",
         "client_name": "Haroon Shahid",
         "contact_phone_ciphertext": phone_enc,
@@ -149,5 +149,5 @@ async def test_instant_whatsapp_booking_handler() -> None:
     assert result["reference"] == "AES-CONFIRM-99"
     assert result["recipient"] == "+923001234567"
     assert "AES-CONFIRM-99" in result["message"]
-    assert "DEMO-001" in result["message"]
+    assert "PROP-001" in result["message"]
     assert "maps.google.com" in result["message"]

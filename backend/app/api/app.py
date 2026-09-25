@@ -863,7 +863,8 @@ async def voice_socket(websocket: WebSocket):
                             (time.perf_counter() - cancel_started) * 1000,
                         )
                 if event.text:
-                    traces.observe("voice.stt_confidence", event.confidence)
+                    if event.confidence is not None:
+                        traces.observe("voice.stt_confidence", event.confidence)
                     await websocket.send_json(
                         {
                             "type": "transcript",
@@ -1213,7 +1214,10 @@ async def telephony_media_socket(websocket: WebSocket) -> None:
                         active_task.cancel()
                     await send_clear()
                 if event.is_final and event.speech_final and event.text:
-                    if event.confidence < settings.stt_min_confidence:
+                    if (
+                        event.confidence is not None
+                        and event.confidence < settings.stt_min_confidence
+                    ):
                         traces.increment("stt:low_confidence")
                         continue
                     if active_task is not None and not active_task.done():

@@ -23,3 +23,11 @@ def test_trace_store_uses_upper_sample_for_small_p95() -> None:
     traces.observe("latency", 10)
     traces.observe("latency", 100)
     assert traces.snapshot()["measurements"]["latency"]["p95"] == 100
+
+
+def test_trace_store_snapshot_is_safe_when_optional_metric_is_missing() -> None:
+    traces = TraceStore()
+    traces.observe("stt_confidence", 0.92)
+    traces.observe("stt_confidence", None)
+    # OpenAI Realtime transcription does not provide a confidence score.
+    assert traces.snapshot()["measurements"]["stt_confidence"]["count"] == 1

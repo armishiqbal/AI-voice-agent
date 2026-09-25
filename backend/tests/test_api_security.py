@@ -221,6 +221,7 @@ def test_booking_contact_is_session_scoped_and_never_sent_to_agent_or_transcript
             event = websocket.receive_json()
             if event.get("type") == "agent_response":
                 break
+        websocket.close()
 
     assert model_inputs == ["hello"]
     assert all(

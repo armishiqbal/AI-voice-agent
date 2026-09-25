@@ -18,15 +18,15 @@ def test_conversation_state_store_round_trips_langgraph_state() -> None:
         amenities=["parking"],
         investment_goal="capital appreciation",
         intent=Intent.BUY,
-        selected_property_ids=["DEMO-001"],
-        retrieved_sources=["DEMO-001:demo-v1"],
+        selected_property_ids=["PROP-001"],
+        retrieved_sources=["PROP-001:demo-v1"],
         tool_results={"property_search": {"count": 1, "source": "sql"}},
     )
     store.save("persistent-conversation", original)
     loaded = store.load("persistent-conversation")
     assert loaded is not None
     assert loaded["city"] == "Karachi"
-    assert loaded["selected_property_ids"] == ["DEMO-001"]
+    assert loaded["selected_property_ids"] == ["PROP-001"]
     assert loaded["bedrooms"] == 3
     assert loaded["amenities"] == ["parking"]
     assert loaded["investment_goal"] == "capital appreciation"

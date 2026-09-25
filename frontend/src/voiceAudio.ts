@@ -1,4 +1,5 @@
 export type AudioChunkHandler = (chunk: Uint8Array) => void;
+import { VoiceActivityDetector } from "./voiceVad";
 
 function resampleTo16k(input: Float32Array, inputRate: number): Int16Array {
   if (inputRate === 16_000) {
@@ -32,8 +33,7 @@ export class BrowserAudioCapture {
   private processor: ScriptProcessorNode | null = null;
   private sink: GainNode | null = null;
   private stopped = false;
-  private speechActive = false;
-  private silenceMs = 0;
+  private readonly voiceActivity = new VoiceActivityDetector();
   private analyser: AnalyserNode | null = null;
 
   getAnalyser(): AnalyserNode | null {
@@ -76,18 +76,9 @@ export class BrowserAudioCapture {
           }
           const rms = Math.sqrt(energy / Math.max(1, pcm.length));
           const frameMs = pcm.length * 1000 / 16_000;
-          if (!this.speechActive && rms >= 0.012) {
-            this.speechActive = true;
-            this.silenceMs = 0;
-            turnHandlers.onSpeechStart();
-          } else if (this.speechActive) {
-            this.silenceMs = rms < 0.008 ? this.silenceMs + frameMs : 0;
-            if (this.silenceMs >= 650) {
-              this.speechActive = false;
-              this.silenceMs = 0;
-              turnHandlers.onSpeechEnd();
-            }
-          }
+          const transition = this.voiceActivity.process(rms, frameMs);
+          if (transition === "speech_started") turnHandlers.onSpeechStart();
+          if (transition === "speech_ended") turnHandlers.onSpeechEnd();
         }
         onChunk(new Uint8Array(pcm.buffer));
       };
@@ -102,8 +93,7 @@ export class BrowserAudioCapture {
 
   stop(): void {
     this.stopped = true;
-    this.speechActive = false;
-    this.silenceMs = 0;
+    this.voiceActivity.reset();
     this.processor?.disconnect();
     this.analyser?.disconnect();
     this.source?.disconnect();
