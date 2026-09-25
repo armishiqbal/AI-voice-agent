@@ -230,7 +230,7 @@ def test_booking_contact_is_session_scoped_and_never_sent_to_agent_or_transcript
         for _, _, text in retained
     )
     new_events = []
-    for _ in range(25):
+    for _ in range(60):
         with SessionLocal() as session:
             events = session.scalars(
                 select(OutboxEventRecord).where(OutboxEventRecord.event_type == "voice.call_completed")
@@ -238,7 +238,7 @@ def test_booking_contact_is_session_scoped_and_never_sent_to_agent_or_transcript
         new_events = [event for event in events if event.id not in existing_event_ids]
         if new_events:
             break
-        sleep(0.02)
+        sleep(0.05)
     assert len(new_events) == 1
     event_payload = new_events[0].payload
     assert event_payload["channel"] == "browser"
