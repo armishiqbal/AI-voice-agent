@@ -1,0 +1,22 @@
+[
+  {"id":"rag-01","query":"Karachi sale options under 3 crore","city":"Karachi","purpose":"sale","max_budget_pkr":30000000,"expected_property_ids":["DEMO-001","DEMO-002"]},
+  {"id":"rag-02","query":"Lahore rental options","city":"Lahore","purpose":"rent","expected_property_ids":["DEMO-016","DEMO-017"]},
+  {"id":"rag-03","query":"Islamabad investment options","city":"Islamabad","purpose":"investment","expected_property_ids":["DEMO-034","DEMO-035"]},
+  {"id":"rag-04","query":"Karachi commercial options","city":"Karachi","purpose":"commercial","expected_property_ids":["DEMO-007","DEMO-008"]},
+  {"id":"rag-05","query":"Lahore sale options","city":"Lahore","purpose":"sale","expected_property_ids":["DEMO-013","DEMO-014"]},
+  {"id":"rag-06","query":"Islamabad rental options","city":"Islamabad","purpose":"rent","expected_property_ids":["DEMO-028","DEMO-029"]},
+  {"id":"rag-07","query":"Karachi investment options","city":"Karachi","purpose":"investment","expected_property_ids":["DEMO-010","DEMO-011"]},
+  {"id":"rag-08","query":"Lahore commercial options","city":"Lahore","purpose":"commercial","expected_property_ids":["DEMO-019","DEMO-020"]},
+  {"id":"rag-09","query":"Islamabad commercial options","city":"Islamabad","purpose":"commercial","expected_property_ids":["DEMO-031","DEMO-032"]},
+  {"id":"rag-10","query":"Karachi rent under 5 crore","city":"Karachi","purpose":"rent","max_budget_pkr":50000000,"expected_property_ids":["DEMO-004","DEMO-005"]},
+  {"id":"rag-11","query":"Lahore investment under 6 crore","city":"Lahore","purpose":"investment","max_budget_pkr":60000000,"expected_property_ids":["DEMO-022","DEMO-023"]},
+  {"id":"rag-12","query":"Islamabad sale under 5 crore","city":"Islamabad","purpose":"sale","max_budget_pkr":50000000,"expected_property_ids":["DEMO-025","DEMO-026"]},
+  {"id":"rag-13","query":"Unavailable Karachi sale record","city":"Karachi","purpose":"sale","max_budget_pkr":50000000,"expected_property_ids":["DEMO-001","DEMO-002"]},
+  {"id":"rag-14","query":"No investment under 1 crore","purpose":"investment","max_budget_pkr":10000000,"expected_property_ids":[]},
+  {"id":"rag-15","query":"No city specified rental","purpose":"rent","expected_property_ids":["DEMO-004","DEMO-005","DEMO-016"]},
+  {"id":"rag-16","query":"DHA Karachi sale","city":"Karachi","purpose":"sale","expected_property_ids":["DEMO-001","DEMO-002"]},
+  {"id":"rag-17","query":"Gulberg Lahore rent","city":"Lahore","purpose":"rent","expected_property_ids":["DEMO-016","DEMO-017"]},
+  {"id":"rag-18","query":"F-11 Islamabad investment","city":"Islamabad","purpose":"investment","expected_property_ids":["DEMO-034","DEMO-035"]},
+  {"id":"rag-19","query":"Commercial Karachi within budget","city":"Karachi","purpose":"commercial","max_budget_pkr":50000000,"expected_property_ids":["DEMO-007","DEMO-008"]},
+  {"id":"rag-20","query":"Property facts with no matching purpose","city":"Karachi","purpose":"unknown","expected_property_ids":[]}
+]

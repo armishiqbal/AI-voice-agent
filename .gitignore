@@ -1,0 +1,28 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.token.json
+client_secret*.json
+secrets/
+.secrets/
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.tsbuildinfo
+
+# Local databases and evaluation output
+*.db
+*.sqlite
+*.sqlite3
+artifacts/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/

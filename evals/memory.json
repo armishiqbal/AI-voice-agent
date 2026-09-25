@@ -1,0 +1,11 @@
+[
+  {
+    "id": "budget-area-cheaper",
+    "turns": [
+      {"input": "Mera budget 3 crore hai", "expected_kind": "ask_clarification"},
+      {"input": "DHA mein options dikha dein", "expected_kind": "recommend"},
+      {"input": "Us se sasti koi option?", "expected_kind": "ask_clarification"}
+    ],
+    "expected_state": {"area": "dha", "intent": "buy"}
+  }
+]

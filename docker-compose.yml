@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env
+    depends_on: [postgres]
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: awaaz
+      POSTGRES_USER: awaaz
+      POSTGRES_PASSWORD: awaaz
+    ports: ["5432:5432"]
+  n8n:
+    image: n8nio/n8n:latest
+    ports: ["5678:5678"]
