@@ -30,3 +30,26 @@ test("an intentional stop closes normally and removes stale call callbacks", () 
   assert.equal(socket.onmessage, null);
   assert.doesNotThrow(() => voiceConversation.closeVoiceSession(null));
 });
+
+test("interruption rejects old audio and accepts only the next response generation", () => {
+  const tracker = new voiceConversation.VoiceResponseTracker();
+  assert.equal(tracker.accept({ type: "agent_response", response_id: 1 }), true);
+  tracker.interrupt();
+  assert.equal(tracker.accept({ type: "audio_chunk", response_id: 1 }), false);
+  assert.equal(tracker.accept({ type: "state", response_id: 2 }), true);
+  assert.equal(tracker.accept({ type: "audio_chunk", response_id: 1 }), false);
+  assert.equal(tracker.accept({ type: "agent_response", response_id: 3 }), true);
+  tracker.reset();
+  assert.equal(tracker.accept({ type: "state", response_id: 1 }), true);
+});
+
+test("manual STT receives bounded leading audio and active turns, not indefinite silence", () => {
+  const gate = new voiceConversation.VoiceInputGate(8);
+  for (let i = 0; i < 20; i++) assert.deepEqual(gate.push(new Uint8Array([i, i, i, i])), []);
+  const leading = gate.start();
+  assert.equal(leading.reduce((sum, frame) => sum + frame.length, 0), 8);
+  assert.equal(leading[1][0], 19);
+  assert.equal(gate.push(new Uint8Array([1, 2])).length, 1);
+  gate.end();
+  assert.deepEqual(gate.push(new Uint8Array([0, 0])), []);
+});

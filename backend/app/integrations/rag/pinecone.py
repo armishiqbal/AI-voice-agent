@@ -36,7 +36,10 @@ class PineconeKnowledgeStore:
             raise RAGProviderError("Install the providers extra to enable Pinecone") from error
         self.embedding_provider = embedding_provider
         self.namespace = namespace
-        self.index = Pinecone(api_key=api_key).Index(index_name)
+        try:
+            self.index = Pinecone(api_key=api_key).Index(index_name)
+        except Exception as error:
+            raise RAGProviderError(f"Pinecone connection failed: {error}") from error
 
     def upsert(self, chunks: list[RetrievedChunk]) -> None:
         if not chunks:
@@ -129,5 +132,5 @@ def build_knowledge_store(config: object) -> object | None:
             embeddings,
             namespace=getattr(config, "pinecone_namespace", "default"),
         )
-    except (LLMDecisionError, RAGProviderError, RuntimeError):
+    except (LLMDecisionError, RAGProviderError, RuntimeError, Exception):
         return None

@@ -15,6 +15,9 @@ export type AcousticEmotion = {
 
 export type ServerEvent = {
   type: string;
+  response_id?: number;
+  recoverable?: boolean;
+  restart_required?: boolean;
   state?: string;
   text?: string;
   confidence?: number | null;
@@ -83,6 +86,9 @@ export function parseServerEvent(data: unknown): ServerEvent | null {
     return null;
   }
   if (!isRecord(value) || typeof value.type !== "string") return null;
+
+  if (value.response_id !== undefined && (!Number.isSafeInteger(value.response_id) || (value.response_id as number) < 1)) return null;
+  if (!isOptionalBoolean(value.recoverable) || !isOptionalBoolean(value.restart_required)) return null;
 
   switch (value.type) {
     case "state":

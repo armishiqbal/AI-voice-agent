@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import EmailStr, model_validator
+from pydantic import EmailStr, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     tts_chatterbox_service_url: str | None = None
     tts_service_token: str | None = None
     tts_timeout_seconds: float = 60.0
+    voice_tts_first_audio_timeout_seconds: float = Field(default=12.0, ge=1, le=60)
+    voice_tts_idle_timeout_seconds: float = Field(default=8.0, ge=1, le=30)
     tts_urdu_model: str = "facebook/mms-tts-urd-script_latin"
     tts_english_model: str = "facebook/mms-tts-eng"
     tts_hindi_model: str = "facebook/mms-tts-hin"

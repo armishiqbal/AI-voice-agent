@@ -5,7 +5,7 @@ import { OrbitalLaserBeams } from "./OrbitalLaserBeams";
 import { WaveformVisualizer } from "./WaveformVisualizer";
 import { BrowserAudioCapture, BrowserAudioPlayback } from "./voiceAudio";
 import { parseServerEvent, shouldInterruptPlayback, audioUplinkState } from "./voiceProtocol";
-import { closeVoiceSession, resolveLiveVoiceAction } from "./voiceConversation";
+import { closeVoiceSession, resolveLiveVoiceAction, VoiceInputGate, VoiceResponseTracker } from "./voiceConversation";
 import { BoundedAudioReplay } from "./voiceReplay";
 import { PropertyComparisonHUD } from "./PropertyComparisonHUD";
 import { PropertyMapRadar } from "./PropertyMapRadar";
@@ -164,6 +164,9 @@ function App() {
   const finishSpeech = useRef<(() => void) | null>(null);
   const selectedInputRef = useRef("");
   const playback = useRef(new BrowserAudioPlayback());
+  const responses = useRef(new VoiceResponseTracker());
+  const serverPhase = useRef<VoicePhase>("idle");
+  const sttRestarts = useRef(0);
   const languageRef = useRef(language);
   const voiceModeRef = useRef<VoiceMode>(voiceMode);
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
@@ -255,6 +258,7 @@ function App() {
   async function startCapture(ws: WebSocket, mode: VoiceMode) {
     const nextCapture = new BrowserAudioCapture();
     capture.current = nextCapture;
+    const inputGate = new VoiceInputGate();
     let audioSessionStarted = false;
     let stoppedForBackpressure = false;
     let manuallyCommitted = false;
@@ -263,6 +267,7 @@ function App() {
     finishSpeech.current = () => {
       if (capture.current !== nextCapture || ws.readyState !== WebSocket.OPEN) return;
       manuallyCommitted = true;
+      inputGate.end();
       ws.send(JSON.stringify({ type: "audio_turn_end" }));
       setActiveActionLabel("LIVE ACTION: PROCESSING YOUR SPEECH");
     };
@@ -284,7 +289,8 @@ function App() {
             return;
           }
           try {
-            ws.send(chunk);
+            const frames = mode === "openai" ? inputGate.push(chunk) : [chunk];
+            for (const frame of frames) ws.send(frame);
           } catch {
             stoppedForBackpressure = true;
             nextCapture.stop();
@@ -304,10 +310,17 @@ function App() {
           ? {
               onSpeechStart: () => {
                 manuallyCommitted = false;
+                responses.current.interrupt();
+                playback.current.stop();
+                setVoicePhase("listening");
                 setActiveActionLabel("LIVE ACTION: USER SPEAKING INTO ORBIT");
-                if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "audio_turn_start" }));
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: "audio_turn_start" }));
+                  for (const frame of inputGate.start()) ws.send(frame);
+                }
               },
               onSpeechEnd: () => {
+                inputGate.end();
                 if (manuallyCommitted) {
                   manuallyCommitted = false;
                   return;
@@ -396,6 +409,8 @@ function App() {
       if (!session || typeof session.ticket !== "string") {
         throw new Error("Invalid voice session from server");
       }
+      responses.current.reset();
+      sttRestarts.current = 0;
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
@@ -458,23 +473,29 @@ function App() {
         const raw: unknown = messageEvent.data;
         if (typeof raw !== "string") return;
         const event = parseServerEvent(raw);
-        if (!event) return;
+        if (!event || !responses.current.accept(event)) return;
         if (shouldInterruptPlayback(event)) playback.current.stop();
         if (event.type === "state" && event.state) {
-          const nextPhase = event.state as VoicePhase;
+          const nextPhase = (event.state === "processing" ? "thinking" : event.state) as VoicePhase;
+          serverPhase.current = nextPhase;
           setVoicePhase(nextPhase);
           if (nextPhase === "listening") setActiveActionLabel("LIVE ACTION: ORBIT LISTENING TO SPEECH");
           if (typeof event.audio_input_available === "boolean") {
             if (event.audio_input_available && !capture.current) void startCapture(ws, voiceModeRef.current);
           }
         }
+        if (event.type === "transcript" && !event.is_final && event.text) {
+          setActiveActionLabel(`HEARING: ${event.text.slice(-120)}`);
+        }
         if (event.type === "transcript" && event.is_final && event.speech_final && event.text) {
+          sttRestarts.current = 0;
           setVoicePhase("thinking");
           setActiveActionLabel(`USER SAID: "${event.text}"`);
           setMessages((current) => [...current, { role: "customer", text: event.text ?? "", time: stamp() }]);
         }
         if (event.type === "agent_response" && event.decision) {
-          setVoicePhase("speaking");
+          setVoicePhase("thinking");
+          playback.current.stop();
           const text = event.decision.spoken_text;
           setSubtitles(text);
           replayAudio.current.reset();
@@ -501,7 +522,7 @@ function App() {
               }))
             );
           } else {
-            setActiveActionLabel("ACTION: AWAAZ IS SPEAKING");
+            setActiveActionLabel("PREPARING SPOKEN REPLY…");
           }
         }
         if (event.type === "agent_unavailable") {
@@ -509,8 +530,22 @@ function App() {
           setActiveActionLabel("AGENT COULD NOT FINISH — PLEASE REPEAT THAT");
         }
         if (event.type === "stt_unavailable") {
-          setVoicePhase("error");
-          setActiveActionLabel("SPEECH RECOGNITION UNAVAILABLE — CHECK VOICE READINESS");
+          if (event.restart_required && event.recoverable && sttRestarts.current < 2 && capture.current) {
+            sttRestarts.current += 1;
+            setActiveActionLabel("RECONNECTING SPEECH RECOGNITION — PLEASE REPEAT");
+            window.setTimeout(() => {
+              if (ws.readyState === WebSocket.OPEN && capture.current) {
+                ws.send(JSON.stringify({ type: "audio_start", sample_rate: 16_000, encoding: "linear16" }));
+              }
+            }, sttRestarts.current * 500);
+          } else {
+            capture.current?.stop();
+            capture.current = null;
+            finishSpeech.current = null;
+            setAudioAvailable(false);
+            setVoicePhase("error");
+            setActiveActionLabel("SPEECH RECOGNITION UNAVAILABLE — RESTART VOICE OR TYPE");
+          }
         }
         if (event.type === "audio_unavailable") {
           setAudioOutputUnavailable(true);
@@ -669,6 +704,7 @@ function App() {
     const text = (overrideText ?? input).trim();
     if (!text) return;
     setInput("");
+    responses.current.interrupt();
     playback.current.stop();
     unlockAudio();
     setMessages((current) => [...current, { role: "customer", text, time: stamp() }]);

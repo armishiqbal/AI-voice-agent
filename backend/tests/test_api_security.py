@@ -544,3 +544,107 @@ def test_openai_voice_buffers_audio_while_transcription_connects(
             events.append(websocket.receive_json())
 
     assert any(event.get("type") == "transcript" and event.get("is_final") for event in events)
+
+
+@pytest.mark.parametrize('first_chunk,reason', [(False, 'tts_first_audio_timeout'), (True, 'tts_idle_timeout')])
+def test_voice_tts_deadlines_recover_and_tag_response(monkeypatch, first_chunk, reason):
+    import app.api.app as api
+
+    closed = []
+    class FakeSTT:
+        async def is_ready(self):
+            return True
+    class HangingTTS:
+        async def synthesize_stream(self, text, language):
+            try:
+                if first_chunk:
+                    yield AudioChunk(sequence=0, audio=b'\x01\x00', language=language)
+                await asyncio.sleep(3600)
+            finally:
+                closed.append(True)
+    monkeypatch.setattr(api, 'stt', FakeSTT())
+    monkeypatch.setattr(api, 'tts', HangingTTS())
+    monkeypatch.setattr(settings, 'voice_tts_first_audio_timeout_seconds', 0.04)
+    monkeypatch.setattr(settings, 'voice_tts_idle_timeout_seconds', 0.04)
+    monkeypatch.setattr(api.agent, 'respond', lambda *args: AgentDecision(kind='answer', spoken_text='One answer.'))
+    monkeypatch.setattr(api.transcripts, 'append', lambda *args: None)
+    with TestClient(app) as client, client.websocket_connect('/v1/voice', headers={'origin':'http://localhost:5173'}) as websocket:
+        _authenticate_voice_socket(websocket, _voice_ticket())
+        websocket.send_json({'type':'user_text', 'text':'Hello', 'language':'en'})
+        events = []
+        while True:
+            event = websocket.receive_json()
+            events.append(event)
+            if event.get('state') == 'listening':
+                break
+        assert events[0]['state'] == 'thinking'
+        response_id = events[0]['response_id']
+        assert all(event['response_id'] == response_id for event in events)
+        unavailable = next(event for event in events if event['type'] == 'audio_unavailable')
+        assert unavailable['reason'] == reason and unavailable['recoverable'] is True
+        assert closed
+
+
+def test_superseded_business_turn_cannot_speak_or_reset_new_turn(monkeypatch):
+    from threading import Event
+
+    import app.api.app as api
+
+    entered = Event()
+    release = Event()
+    class FakeSTT:
+        async def is_ready(self):
+            return True
+    class FakeTTS:
+        async def synthesize_stream(self, text, language):
+            yield AudioChunk(sequence=0, audio=text.encode(), language=language)
+    def respond(conversation_id, text, language):
+        if text == 'first':
+            entered.set()
+            assert release.wait(2)
+        return AgentDecision(kind='answer', spoken_text=text)
+    monkeypatch.setattr(api, 'stt', FakeSTT())
+    monkeypatch.setattr(api, 'tts', FakeTTS())
+    monkeypatch.setattr(api.agent, 'respond', respond)
+    monkeypatch.setattr(api.transcripts, 'append', lambda *args: None)
+    with TestClient(app) as client, client.websocket_connect('/v1/voice', headers={'origin':'http://localhost:5173'}) as websocket:
+        _authenticate_voice_socket(websocket, _voice_ticket())
+        websocket.send_json({'type':'user_text','text':'first'})
+        first = websocket.receive_json()
+        assert entered.wait(2)
+        websocket.send_json({'type':'user_text','text':'second'})
+        second = websocket.receive_json()
+        assert second['state'] == 'thinking' and second['response_id'] > first['response_id']
+        release.set()
+        events = []
+        while True:
+            event = websocket.receive_json()
+            events.append(event)
+            if event.get('state') == 'listening':
+                break
+        assert all(event['response_id'] == second['response_id'] for event in events)
+        assert next(event for event in events if event['type'] == 'agent_response')['decision']['spoken_text'] == 'second'
+
+
+def test_stt_unexpected_completion_can_restart_without_dead_queue(monkeypatch):
+    import app.api.app as api
+
+    calls = []
+    class EndingSTT:
+        async def is_ready(self):
+            return True
+        async def stream(self, audio):
+            calls.append(True)
+            if False:
+                yield
+    monkeypatch.setattr(api, 'stt', EndingSTT())
+    with TestClient(app) as client, client.websocket_connect('/v1/voice', headers={'origin':'http://localhost:5173'}) as websocket:
+        _authenticate_voice_socket(websocket, _voice_ticket())
+        for _ in range(2):
+            websocket.send_json({'type':'audio_start','sample_rate':16000})
+            assert websocket.receive_json()['audio_started'] is True
+            event = websocket.receive_json()
+            assert event['type'] == 'stt_unavailable'
+            assert event['reason'] == 'stt_stream_ended'
+            assert event['recoverable'] is True and event['restart_required'] is True
+        assert len(calls) == 2

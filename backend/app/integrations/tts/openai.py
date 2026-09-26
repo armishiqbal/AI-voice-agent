@@ -43,7 +43,9 @@ class OpenAISpeechProvider:
         voice = voice_id or self.voice
         instructions = instructions_override or (
             "Speak clearly and warmly for a Pakistani real-estate assistant. "
-            "Use concise natural Urdu-English code-switching. Do not add words."
+            "Use natural Urdu-English code-switching and a relaxed conversational pace. "
+            "Use short pauses at sentence boundaries, clear numbers and a warm, restrained tone. "
+            "Avoid exaggerated sales delivery. Read only the supplied words."
         )
         normalized_text = apply_phonetic_transliteration(text)
         payload = {
@@ -72,11 +74,14 @@ class OpenAISpeechProvider:
                     )
                 pending = bytearray()
                 sequence = 0
-                async for part in response.aiter_bytes(8192):
+                # Yield complete PCM samples as network bytes arrive. Asking httpx for an
+                # 8192-byte block held back ~171ms of 24kHz audio before first playback.
+                async for part in response.aiter_bytes():
                     pending.extend(part)
-                    while len(pending) >= 8192:
-                        chunk = bytes(pending[:8192])
-                        del pending[:8192]
+                    while len(pending) >= 2:
+                        size = min(2048, len(pending) - len(pending) % 2)
+                        chunk = bytes(pending[:size])
+                        del pending[:size]
                         yield AudioChunk(
                             sequence=sequence,
                             audio=chunk,
@@ -86,16 +91,9 @@ class OpenAISpeechProvider:
                         )
                         sequence += 1
                 if pending:
-                    if len(pending) % 2:
-                        pending.pop()
-                    if pending:
-                        yield AudioChunk(
-                            sequence=sequence,
-                            audio=bytes(pending),
-                            language=language,
-                            sample_rate=24_000,
-                            encoding="pcm_s16le",
-                        )
+                    raise TTSProviderError("OpenAI speech returned an incomplete PCM sample")
+                if sequence == 0:
+                    raise TTSProviderError("OpenAI speech returned no audio")
         except TTSProviderError:
             raise
         except httpx.HTTPError as error:

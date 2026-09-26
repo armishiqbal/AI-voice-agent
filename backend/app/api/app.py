@@ -732,71 +732,99 @@ async def voice_socket(websocket: WebSocket):
     audio_started_at: float | None = None
     response_language = "ur-Latn"
 
-    async def process_turn(text: str, language: str, turn_received_at: float) -> None:
-        nonlocal appointment_reference, active_audio_started
+    response_id = 0
+    active_tts_started = False
+    business_lock = asyncio.Lock()
+    turn_tasks: set[asyncio.Task[None]] = set()
+    ending_audio_queues: set[int] = set()
+
+    async def send_turn(payload: dict[str, object], turn_id: int) -> None:
+        if turn_id == response_id:
+            await websocket.send_json({**payload, "response_id": turn_id})
+
+    def launch_turn(text: str, language: str, received_at: float) -> asyncio.Task[None]:
+        nonlocal response_id, active_audio_started, active_tts_started
+        response_id += 1
+        active_audio_started = False
+        active_tts_started = False
+        task = asyncio.create_task(process_turn(text, language, received_at, response_id))
+        turn_tasks.add(task)
+        task.add_done_callback(turn_tasks.discard)
+        return task
+
+    async def process_turn(text: str, language: str, turn_received_at: float, turn_id: int) -> None:
+        nonlocal appointment_reference, active_audio_started, active_tts_started
         started = time.perf_counter()
+        await send_turn({"type": "state", "state": "thinking"}, turn_id)
         try:
-            decision = await asyncio.to_thread(agent.respond, conversation_id, text, language)
-            if decision.kind == "recommend":
-                presented_property_ids[:] = decision.property_ids
-            conversation_state = agent.states.get(conversation_id)
-            selected_ids = presented_property_ids or (
-                conversation_state.selected_property_ids if conversation_state else []
-            )
-            booking_result = await asyncio.to_thread(
-                booking_flow.handle,
-                text,
-                decision,
-                selected_ids,
-                booking_contact,
-                conversation_id,
-                "; ".join(
-                    f"{name}: {value}"
-                    for name, value in (
-                        ("City", conversation_state.city),
-                        ("Area", conversation_state.area),
-                        ("Budget PKR", conversation_state.budget),
-                        ("Bedrooms", conversation_state.bedrooms),
-                        ("Size sqft", conversation_state.target_size_sqft),
-                        ("Amenities", ", ".join(conversation_state.amenities)),
-                        ("Investment goal", conversation_state.investment_goal),
-                    )
-                    if value is not None and value != ""
-                ) if conversation_state else "",
-            )
-            if booking_result is not None:
-                decision = booking_result.decision
-                if not decision.property_ids:
-                    decision = decision.model_copy(
-                        update={
-                            "property_ids": [booking_flow.property_id]
-                            if booking_flow.property_id
-                            else booking_flow.property_choices
-                        }
-                    )
-                if booking_flow.phase in {"slots", "manage_slots"}:
-                    await websocket.send_json(
-                        {
-                            "type": "booking_slots",
-                            "property_id": booking_flow.property_id,
-                            "slots": [slot.isoformat() for slot in booking_flow.slots[:3]],
-                        }
-                    )
-                if booking_result.appointment is not None:
-                    appointment_reference = booking_result.appointment.get("reference")
-                    await websocket.send_json(
-                        {"type": "appointment_result", **booking_result.appointment}
-                    )
-            await asyncio.to_thread(transcripts.append, conversation_id, "user", text)
-            await asyncio.to_thread(
-                transcripts.append, conversation_id, "assistant", decision.spoken_text
-            )
+            async with business_lock:
+                if turn_id != response_id:
+                    return
+                decision = await asyncio.to_thread(agent.respond, conversation_id, text, language)
+                if turn_id != response_id:
+                    return
+                if decision.kind == "recommend":
+                    presented_property_ids[:] = decision.property_ids
+                conversation_state = agent.states.get(conversation_id)
+                selected_ids = presented_property_ids or (
+                    conversation_state.selected_property_ids if conversation_state else []
+                )
+                booking_result = await asyncio.to_thread(
+                    booking_flow.handle,
+                    text,
+                    decision,
+                    selected_ids,
+                    booking_contact,
+                    conversation_id,
+                    "; ".join(
+                        f"{name}: {value}"
+                        for name, value in (
+                            ("City", conversation_state.city),
+                            ("Area", conversation_state.area),
+                            ("Budget PKR", conversation_state.budget),
+                            ("Bedrooms", conversation_state.bedrooms),
+                            ("Size sqft", conversation_state.target_size_sqft),
+                            ("Amenities", ", ".join(conversation_state.amenities)),
+                            ("Investment goal", conversation_state.investment_goal),
+                        )
+                        if value is not None and value != ""
+                    ) if conversation_state else "",
+                )
+                if booking_result is not None:
+                    decision = booking_result.decision
+                    if not decision.property_ids:
+                        decision = decision.model_copy(
+                            update={
+                                "property_ids": [booking_flow.property_id]
+                                if booking_flow.property_id
+                                else booking_flow.property_choices
+                            }
+                        )
+                    if booking_flow.phase in {"slots", "manage_slots"}:
+                        await send_turn(
+                            {
+                                "type": "booking_slots",
+                                "property_id": booking_flow.property_id,
+                                "slots": [slot.isoformat() for slot in booking_flow.slots[:3]],
+                            }, turn_id
+                        )
+                    if booking_result.appointment is not None:
+                        appointment_reference = booking_result.appointment.get("reference")
+                        await send_turn(
+                            {"type": "appointment_result", **booking_result.appointment}, turn_id
+                        )
+                await asyncio.to_thread(transcripts.append, conversation_id, "user", text)
+                await asyncio.to_thread(
+                    transcripts.append, conversation_id, "assistant", decision.spoken_text
+                )
         except Exception:  # noqa: BLE001 - voice sessions must fail closed and remain usable
             traces.increment("provider_failure:agent")
-            await websocket.send_json(
-                {"type": "agent_unavailable", "reason": "The agent could not complete this turn"}
+            await send_turn(
+                {"type": "agent_unavailable", "reason": "agent_turn_failed", "recoverable": True}, turn_id
             )
-            await websocket.send_json({"type": "state", "state": "listening"})
+            await send_turn({"type": "state", "state": "listening"}, turn_id)
+            return
+        if turn_id != response_id:
             return
         decision_latency_ms = (time.perf_counter() - started) * 1000
         traces.observe("voice.decision_latency_ms", decision_latency_ms)
@@ -817,10 +845,12 @@ async def voice_socket(websocket: WebSocket):
         }
         if emotion is not None:
             response_payload["emotion"] = emotion.as_dict()
-        await websocket.send_json(response_payload)
+        await send_turn(response_payload, turn_id)
         first_audio_recorded = False
         end_to_first_audio_recorded = False
         tts_started_at = time.perf_counter()
+        stream = None
+        active_tts_started = True
         try:
             stream = pipeline_synthesize_clauses(
                 session_tts,
@@ -829,7 +859,18 @@ async def voice_socket(websocket: WebSocket):
                 emotion=emotion,
                 enabled=settings.voice_early_clause_streaming_enabled,
             )
-            async for chunk in stream:
+            next_audio_deadline = time.perf_counter() + settings.voice_tts_first_audio_timeout_seconds
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(
+                        anext(stream), timeout=max(0.0, next_audio_deadline - time.perf_counter())
+                    )
+                except StopAsyncIteration:
+                    break
+                if turn_id != response_id:
+                    return
+                if chunk.audio:
+                    next_audio_deadline = time.perf_counter() + settings.voice_tts_idle_timeout_seconds
                 if chunk.audio and not first_audio_recorded:
                     active_audio_started = True
                     audio_ready_at = time.perf_counter()
@@ -841,7 +882,7 @@ async def voice_socket(websocket: WebSocket):
                         (audio_ready_at - tts_started_at) * 1000,
                     )
                     first_audio_recorded = True
-                await websocket.send_json(
+                await send_turn(
                     {
                         "type": "audio_chunk",
                         "sequence": chunk.sequence,
@@ -850,7 +891,7 @@ async def voice_socket(websocket: WebSocket):
                         "encoding": chunk.encoding,
                         "audio_base64": base64.b64encode(chunk.audio).decode("ascii"),
                         "is_final": chunk.is_final,
-                    }
+                    }, turn_id
                 )
                 if chunk.audio and not end_to_first_audio_recorded:
                     traces.observe(
@@ -858,22 +899,38 @@ async def voice_socket(websocket: WebSocket):
                         (time.perf_counter() - turn_received_at) * 1000,
                     )
                     end_to_first_audio_recorded = True
-        except TTSProviderError as error:
+            if not first_audio_recorded:
+                await send_turn({"type": "audio_unavailable", "reason": "tts_empty_audio", "recoverable": True}, turn_id)
+        except TimeoutError:
+            reason = "tts_idle_timeout" if first_audio_recorded else "tts_first_audio_timeout"
+            traces.increment(f"provider_failure:{reason}")
+            await send_turn({"type": "audio_unavailable", "reason": reason, "recoverable": True}, turn_id)
+        except Exception:  # provider diagnostics must not leak through the voice protocol
             traces.increment("provider_failure:tts")
-            await websocket.send_json({"type": "audio_unavailable", "reason": str(error)})
+            await send_turn({"type": "audio_unavailable", "reason": "tts_provider_error", "recoverable": True}, turn_id)
         finally:
+            if stream is not None:
+                try:
+                    await asyncio.wait_for(stream.aclose(), settings.voice_tts_idle_timeout_seconds)
+                except Exception:
+                    traces.increment("provider_failure:tts_cleanup")
             traces.observe(
                 "voice.tts_stream_duration_ms", (time.perf_counter() - tts_started_at) * 1000
             )
-        await websocket.send_json({"type": "state", "state": "listening"})
+        await send_turn({"type": "state", "state": "listening"}, turn_id)
 
     def cancel_active(*, only_after_audio: bool = False) -> float | None:
-        if active_task is None or active_task.done():
-            return None
+        nonlocal response_id
         if only_after_audio and not active_audio_started:
             return None
+        response_id += 1
+        if active_task is None or active_task.done():
+            return None
         cancel_started = time.perf_counter()
-        active_task.cancel()
+        # Let already-running reasoning/business writes settle under their lock.
+        # A stale turn checks its generation before executing booking or speaking.
+        if active_tts_started:
+            active_task.cancel()
         return cancel_started
 
     async def audio_stream(queue: asyncio.Queue[bytes | None]) -> AsyncIterator[bytes]:
@@ -884,7 +941,8 @@ async def voice_socket(websocket: WebSocket):
             yield chunk
 
     async def consume_stt(queue: asyncio.Queue[bytes | None]) -> None:
-        nonlocal active_task, active_audio_started, audio_started_at
+        nonlocal active_task, active_audio_started, audio_started_at, audio_queue
+        failure_reason = "stt_stream_ended"
         try:
             async for event in session_stt.stream(audio_stream(queue)):
                 if event.speech_started:
@@ -894,6 +952,7 @@ async def voice_socket(websocket: WebSocket):
                             "type": "state",
                             "state": "listening",
                             "interrupt_playback": True,
+                            "response_id": response_id,
                         }
                     )
                     if cancel_started is not None:
@@ -937,17 +996,27 @@ async def voice_socket(websocket: WebSocket):
                     cancel_started = cancel_active()
                     turn_received_at = time.perf_counter()
                     active_audio_started = False
-                    active_task = asyncio.create_task(
-                        process_turn(event.text, response_language, turn_received_at)
-                    )
+                    active_task = launch_turn(event.text, response_language, turn_received_at)
                     if cancel_started is not None:
                         traces.observe(
                             "voice.barge_in_cancel_latency_ms",
                             (time.perf_counter() - cancel_started) * 1000,
                         )
-        except STTProviderError as error:
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            failure_reason = "stt_provider_error"
             traces.increment("provider_failure:stt")
-            await websocket.send_json({"type": "stt_unavailable", "reason": str(error)})
+        finally:
+            expected_end = id(queue) in ending_audio_queues
+            ending_audio_queues.discard(id(queue))
+            if audio_queue is queue:
+                audio_queue = None
+                if not expected_end and not asyncio.current_task().cancelling():
+                    await websocket.send_json({
+                        "type": "stt_unavailable", "reason": failure_reason,
+                        "recoverable": True, "restart_required": True,
+                    })
 
     try:
         while True:
@@ -1018,6 +1087,7 @@ async def voice_socket(websocket: WebSocket):
                             await websocket.close(code=1013, reason="Audio input queue is full")
                             break
                     stt_task.cancel()
+                    await asyncio.gather(stt_task, return_exceptions=True)
                 audio_queue = asyncio.Queue(maxsize=settings.voice_audio_queue_frames)
                 audio_started_at = time.perf_counter()
                 stt_task = asyncio.create_task(consume_stt(audio_queue))
@@ -1027,6 +1097,7 @@ async def voice_socket(websocket: WebSocket):
                 continue
             if event.get("type") == "audio_end":
                 if audio_queue is not None:
+                    ending_audio_queues.add(id(audio_queue))
                     if voice_mode == "openai":
                         try:
                             audio_queue.put_nowait(b"")
@@ -1047,12 +1118,13 @@ async def voice_socket(websocket: WebSocket):
                     except asyncio.QueueFull:
                         await websocket.close(code=1013, reason="Audio input queue is full")
                         break
-                cancel_started = cancel_active(only_after_audio=True)
+                cancel_started = cancel_active()
                 await websocket.send_json(
                     {
                         "type": "state",
                         "state": "listening",
                         "interrupt_playback": True,
+                            "response_id": response_id,
                     }
                 )
                 if cancel_started is not None:
@@ -1077,6 +1149,7 @@ async def voice_socket(websocket: WebSocket):
                         "type": "state",
                         "state": "listening",
                         "interrupt_playback": True,
+                            "response_id": response_id,
                     }
                 )
                 if cancel_started is not None:
@@ -1127,7 +1200,7 @@ async def voice_socket(websocket: WebSocket):
             )
             cancel_started = cancel_active()
             turn_received_at = time.perf_counter()
-            active_task = asyncio.create_task(process_turn(user_text, language, turn_received_at))
+            active_task = launch_turn(user_text, language, turn_received_at)
             if cancel_started is not None:
                 traces.observe(
                     "voice.barge_in_cancel_latency_ms",
@@ -1136,7 +1209,9 @@ async def voice_socket(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        pending_tasks = [task for task in (active_task, stt_task) if task is not None]
+        pending_tasks = list(turn_tasks)
+        if stt_task is not None:
+            pending_tasks.append(stt_task)
         for task in pending_tasks:
             if not task.done():
                 task.cancel()

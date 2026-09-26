@@ -35,6 +35,8 @@ export class BrowserAudioCapture {
   private sink: GainNode | null = null;
   private firstFrameTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  private lastFrameAt = 0;
+  private stallTimer: ReturnType<typeof setInterval> | null = null;
   private readonly voiceActivity = new VoiceActivityDetector();
   private analyser: AnalyserNode | null = null;
 
@@ -88,12 +90,18 @@ export class BrowserAudioCapture {
         this.stop();
       };
       this.processor.onprocessorerror = captureStalled;
+      stream.getAudioTracks().forEach((track) => { track.onended = captureStalled; });
+      this.lastFrameAt = performance.now();
+      this.stallTimer = setInterval(() => {
+        if (performance.now() - this.lastFrameAt > 5_000) captureStalled();
+      }, 1_000);
       this.processor.port.onmessage = (event: MessageEvent<Float32Array>) => {
         if (this.stopped || !(event.data instanceof Float32Array)) return;
         if (this.firstFrameTimer !== null) {
           clearTimeout(this.firstFrameTimer);
           this.firstFrameTimer = null;
         }
+        this.lastFrameAt = performance.now();
         const pcm = resampleTo16k(event.data, context.sampleRate);
         if (turnHandlers) {
           let energy = 0;
@@ -127,6 +135,8 @@ export class BrowserAudioCapture {
     this.stopped = true;
     if (this.firstFrameTimer !== null) clearTimeout(this.firstFrameTimer);
     this.firstFrameTimer = null;
+    if (this.stallTimer !== null) clearInterval(this.stallTimer);
+    this.stallTimer = null;
     this.voiceActivity.reset();
     this.processor?.port.postMessage({ type: "stop" });
     if (this.processor) this.processor.port.onmessage = null;
@@ -134,7 +144,7 @@ export class BrowserAudioCapture {
     this.analyser?.disconnect();
     this.source?.disconnect();
     this.sink?.disconnect();
-    this.stream?.getTracks().forEach((track) => track.stop());
+    this.stream?.getTracks().forEach((track) => { track.onended = null; track.stop(); });
     void this.context?.close();
     this.analyser = null;
     this.processor = null;
@@ -145,141 +155,4 @@ export class BrowserAudioCapture {
   }
 }
 
-export class BrowserAudioPlayback {
-  private context: AudioContext | null = null;
-  private cursor = 0;
-  private sources = new Set<AudioBufferSourceNode>();
-  private encodedChunks: Uint8Array[] = [];
-  private mediaSource: MediaSource | null = null;
-  private mediaUrl: string | null = null;
-  private mediaAudio: HTMLAudioElement | null = null;
-  private mediaBuffer: SourceBuffer | null = null;
-  private mediaQueue: Uint8Array[] = [];
-  private mediaFinalRequested = false;
-  private analyser: AnalyserNode | null = null;
-
-  getAnalyser(): AnalyserNode | null {
-    return this.analyser;
-  }
-
-  async activate(): Promise<void> {
-    await this.ensureContext().resume();
-  }
-
-  private ensureContext(): AudioContext {
-    if (!this.context) {
-      this.context = new AudioContext();
-      this.analyser = this.context.createAnalyser();
-      this.analyser.fftSize = 128;
-      this.analyser.connect(this.context.destination);
-    }
-    return this.context;
-  }
-
-  playPcm16(base64: string, sampleRate: number): void {
-    const context = this.ensureContext();
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    const samples = new Int16Array(bytes.buffer);
-    const buffer = context.createBuffer(1, samples.length, sampleRate);
-    const channel = buffer.getChannelData(0);
-    for (let index = 0; index < samples.length; index += 1) channel[index] = samples[index] / 0x7fff;
-    const source = context.createBufferSource();
-    source.buffer = buffer;
-    source.connect(this.analyser || context.destination);
-    const start = Math.max(context.currentTime, this.cursor);
-    source.start(start);
-    this.cursor = start + buffer.duration;
-    this.sources.add(source);
-    source.onended = () => this.sources.delete(source);
-  }
-
-  enqueueEncoded(base64: string, isFinal: boolean): void {
-    if (base64) {
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-      if (typeof MediaSource !== "undefined" && MediaSource.isTypeSupported("audio/mpeg")) {
-        this.startMediaStream();
-        this.mediaQueue.push(bytes);
-        this.flushMediaStream();
-      } else {
-        this.encodedChunks.push(bytes);
-      }
-    }
-    if (this.mediaSource) {
-      this.mediaFinalRequested ||= isFinal;
-      this.flushMediaStream();
-      return;
-    }
-    if (!isFinal || this.encodedChunks.length === 0) return;
-    const total = this.encodedChunks.reduce((sum, item) => sum + item.byteLength, 0);
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const item of this.encodedChunks) {
-      merged.set(item, offset);
-      offset += item.byteLength;
-    }
-    this.encodedChunks = [];
-    void this.ensureContext().decodeAudioData(merged.buffer.slice(0)).then((buffer) => {
-      const source = this.ensureContext().createBufferSource();
-      source.buffer = buffer;
-      source.connect(this.analyser || this.ensureContext().destination);
-      const start = Math.max(this.ensureContext().currentTime, this.cursor);
-      source.start(start);
-      this.cursor = start + buffer.duration;
-      this.sources.add(source);
-      source.onended = () => this.sources.delete(source);
-    }).catch(() => undefined);
-  }
-
-  private startMediaStream(): void {
-    if (this.mediaSource) return;
-    this.mediaSource = new MediaSource();
-    this.mediaUrl = URL.createObjectURL(this.mediaSource);
-    this.mediaAudio = new Audio(this.mediaUrl);
-    this.mediaAudio.autoplay = true;
-    this.mediaSource.addEventListener("sourceopen", () => {
-      if (!this.mediaSource || this.mediaBuffer) return;
-      this.mediaBuffer = this.mediaSource.addSourceBuffer("audio/mpeg");
-      this.mediaBuffer.addEventListener("updateend", () => this.flushMediaStream());
-      this.flushMediaStream();
-    }, { once: true });
-    void this.mediaAudio.play().catch(() => undefined);
-  }
-
-  private flushMediaStream(): void {
-    if (!this.mediaSource || !this.mediaBuffer || this.mediaBuffer.updating) return;
-    if (this.mediaQueue.length) {
-      const chunk = this.mediaQueue.shift();
-      if (chunk) {
-        const buffer = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
-        this.mediaBuffer.appendBuffer(buffer);
-      }
-      return;
-    }
-    if (this.mediaFinalRequested && this.mediaSource.readyState === "open") {
-      this.mediaSource.endOfStream();
-    }
-  }
-
-  stop(): void {
-    this.sources.forEach((source) => source.stop());
-    this.sources.clear();
-    this.cursor = 0;
-    this.encodedChunks = [];
-    this.mediaQueue = [];
-    this.mediaFinalRequested = false;
-    this.mediaAudio?.pause();
-    if (this.mediaAudio) {
-      this.mediaAudio.removeAttribute("src");
-      this.mediaAudio.load();
-    }
-    if (this.mediaUrl) URL.revokeObjectURL(this.mediaUrl);
-    this.mediaSource = null;
-    this.mediaUrl = null;
-    this.mediaAudio = null;
-    this.mediaBuffer = null;
-  }
-}
+export { BrowserAudioPlayback } from "./voicePlayback";

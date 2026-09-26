@@ -5,6 +5,7 @@ import base64
 import json
 import struct
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from os import getenv
 from typing import Any
 
@@ -123,6 +124,7 @@ class OpenAIRealtimeSTT:
                                 )
                             )
 
+                partials: dict[str, str] = {}
                 sender = asyncio.create_task(send_audio())
                 receiver = asyncio.create_task(connection.recv())
                 try:
@@ -157,6 +159,14 @@ class OpenAIRealtimeSTT:
                             continue
                         event = parse_openai_transcription_event(message)
                         if event is not None:
+                            item_id = str(message.get("item_id") or "current")
+                            if event.is_final:
+                                partials.pop(item_id, None)
+                            else:
+                                if len(partials) >= 32 and item_id not in partials:
+                                    partials.pop(next(iter(partials)))
+                                partials[item_id] = (partials.get(item_id, "") + event.text)[-4000:]
+                                event = replace(event, text=partials[item_id])
                             yield event
                         elif isinstance(message, dict) and message.get("type") == "error":
                             error = message.get("error")
