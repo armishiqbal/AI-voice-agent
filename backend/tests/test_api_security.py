@@ -35,7 +35,9 @@ def _authenticate_voice_socket(websocket, ticket: str) -> dict[str, object]:
 @pytest.fixture(autouse=True)
 def isolate_voice_session_service(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.api.app as api
+    from app.repositories.bootstrap import create_schema_for_local_development
 
+    create_schema_for_local_development()
     monkeypatch.setattr(
         api,
         "voice_sessions",

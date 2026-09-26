@@ -1,6 +1,12 @@
+"""Synthetic evaluation examples, not authenticated listings or company inventory.
+
+Real place/developer names do not verify the generated prices, availability,
+amenities or payment terms. Never seed these records into the live runtime.
+"""
+
 from app.domain.models import Property
 
-REAL_PAKISTANI_PROPERTIES = {
+EVALUATION_PROPERTY_DETAILS = {
     1: {
         "title": "Emaar Coral Towers 2-Bed Oceanfront Luxury Apartment, Crescent Bay, DHA Phase 8, Karachi",
         "developer": "Emaar Pakistan",
@@ -306,7 +312,7 @@ def demo_properties() -> list[Property]:
                 number = len(items) + 1
                 available = variant != 2
                 price = (18 + city_index * 6 + purpose_index * 8 + variant * 3) * 1_000_000
-                prop_info = REAL_PAKISTANI_PROPERTIES.get(number, {})
+                prop_info = EVALUATION_PROPERTY_DETAILS.get(number, {})
                 amenities = list(prop_info.get("amenities", ["parking", "security", "masjid"]))
                 for standard_amenity in ("parking", "security", "masjid"):
                     if not any(standard_amenity in a.lower() for a in amenities):
@@ -334,7 +340,7 @@ def demo_properties() -> list[Property]:
                         available=available,
                         assigned_employee=["Ayesha Khan", "Hamza Ali", "Sara Ahmed"][variant],
                         source_version="v1.0",
-                        source="verified-crm-inventory",
+                        source="synthetic-evaluation-fixture",
                     )
                 )
     return items

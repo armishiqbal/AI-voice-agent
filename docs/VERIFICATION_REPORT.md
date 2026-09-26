@@ -7,7 +7,7 @@ is deferred. Re-run the commands after configuration or code changes; these are 
 
 | Check | Result | Scope |
 |---|---|---|
-| Backend pytest | 178 passed, 3 skipped at this checkpoint | SQLite/local contracts; skips need PostgreSQL concurrency |
+| Backend pytest | 202 passed, 3 skipped | SQLite/local contracts; skips need PostgreSQL concurrency |
 | Frontend tests | 21 passed | Protocol, AudioWorklet, turn control, buffering and UI utilities |
 | TypeScript + Vite production build | Passed | Build output generated locally |
 | Ruff | Passed | `backend/app backend/tests scripts` |
@@ -15,15 +15,17 @@ is deferred. Re-run the commands after configuration or code changes; these are 
 | Original single-turn evaluation | 41/41 | Separate from the conversation count |
 | SQL retrieval evaluation | 20/20 | Fixture property IDs; not arbitrary prose hallucination |
 | Memory and appointment evaluations | Passed local release gates | Local state/service correctness |
-| Chunk-size retrieval experiment | Six size/overlap variants, 20 gold questions | See RAG report for denominators and retrieval modes |
+| Chunk-size retrieval experiment | Six variants × 20 queries; real OpenAI embeddings + FAISS source recall@3 100% | See RAG report for denominators and retrieval modes |
 | Fresh SQLite migration | Passed through 0022 | Separate temporary database, no production mutation |
 | Python wheel | Built; 69 application files, API/agent/FAISS modules present | Package discovery now includes nested modules |
 | Docker Compose configuration | Passed `config --quiet` | No container build/runtime claim; Docker daemon unavailable |
+| Concurrent clause TTS smoke | Failed: first audio 21,519 ms; timeout at 30 s, 9,600 bytes | Kept opt-in; standard streaming default retained |
+| Live OpenAI direct TTS smoke | Passed: 156,000 audio bytes; first audio 2,678 ms; total 3,373 ms | One synthetic phrase; excludes STT and physical playback, not p95 |
 | Presentation | 10 slides, 10 speaker notes, 600 seconds | Offline HTML, no remote assets |
 
 Source artifacts are under ignored `artifacts/evaluation/`: `backend-tests.txt`, `lint.txt`,
 `release-report.json`, `multiturn-conversations.json`, `chunk-retrieval.json`,
-`annotated-trace.json`, and `tts-comparison.json`. They contain fixture evidence and readiness,
+`chunk-retrieval-live-embeddings.json`, `annotated-trace.json`, and `tts-comparison.json`. They contain fixture evidence and readiness,
 not secret credentials or real caller recordings. The annotated trace labels guardrails,
 intent, grounding and route responsibilities.
 
@@ -35,13 +37,22 @@ appointment contact/reference checks, explicit confirmation, declining a voice a
 outbox retries and retained partial provider receipts. These finite cases do not establish universal
 prompt-injection resistance or an independent penetration-test certification.
 
+The ordinary streaming path remains the default. Concurrent clause synthesis can be enabled with
+`VOICE_EARLY_CLAUSE_STREAMING_ENABLED=true`, but is not latency-approved by these measurements.
+The direct TTS first-audio result already exceeds two seconds, before STT/playback overhead.
+
+Additional voice pipeline regressions cover legacy provider signatures, bounded current/next
+clause prefetch, full-queue cancellation, provider cleanup and error recovery.
+
 Two dependency deprecation warnings remain in Starlette/httpx/AnyIO test plumbing. Browser capture
 uses AudioWorklet; the deprecated ScriptProcessorNode implementation has been removed.
 
 ## External evidence not established
 
 - Real company inventory and brochures/FAQs have not been supplied. Runtime data remains empty until import.
-- OpenAI voice configuration is ready; this does not prove current physical-microphone quality or p95
+- OpenAI authentication and one direct TTS request passed. An earlier clause-pipeline smoke timed out
+  at 45 seconds while integration changes were in progress; its failure remains archived. These
+  observations do not prove current physical-microphone quality or p95
   end-of-speech to audible reply below two seconds.
 - Fish and ElevenLabs benchmark each returned 20 configuration errors / zero completed phrases;
   neither has configured credentials here. Null latency is unavailable, not zero milliseconds.

@@ -62,14 +62,14 @@ flowchart TD
   F --> S[Voice confirmation or validated API request]
   S --> V[Deterministic appointment service]
   V --> O[SQL transaction plus outbox]
-  O --> W[Calendar then Gmail then optional n8n CRM]
+  O --> W[Delivery LangGraph: Calendar tool → Gmail tool → optional n8n CRM tool]
 ```
 
 The graph logs guardrails, detection, resolution, grounding validation and the selected route. Route nodes express a
 decision; they do not grant the LLM permission to write Calendar or send email. RAG runs within
-grounded resolution; email is an outbox action, not a standalone LangGraph node. This is an
-explicit architecture difference from the brief's illustrative graph, with the same business
-stages split across trusted services. API validation remains authoritative for consent,
+grounded resolution. A separate delivery LangGraph executes Calendar, Gmail and optional n8n
+CRM tools as real ordered nodes, consuming saved receipts on retries. The reasoning and delivery
+graphs communicate through the SQL outbox, keeping external writes outside model discretion. API validation remains authoritative for consent,
 contact identity, exact appointment date/time, employee ownership, availability and idempotency.
 Spoken confirmation never removes those checks. Employee email is an operator-managed mapping,
 not an address invented by the model.

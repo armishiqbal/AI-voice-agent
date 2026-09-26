@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     fish_audio_model: str = "s2.1-pro"
     fish_audio_reference_id: str | None = None
     fish_audio_sample_rate: int = 24_000
+    fish_audio_latency: str = "low"
+    voice_early_clause_streaming_enabled: bool = False
+    voice_emotion_matching_enabled: bool = True
     elevenlabs_api_key: str | None = None
     elevenlabs_voice_id: str | None = None
     elevenlabs_model: str = "eleven_multilingual_v2"
@@ -120,6 +123,8 @@ class Settings(BaseSettings):
         self.tts_provider = self.tts_provider.casefold()
         if self.tts_provider.casefold() not in {"router", "fish", "elevenlabs", "opensource"}:
             raise ValueError("TTS_PROVIDER must be router, fish, elevenlabs, or opensource")
+        if self.fish_audio_latency not in {"ultra_low", "low", "balanced", "normal"}:
+            raise ValueError("FISH_AUDIO_LATENCY must be ultra_low, low, balanced, or normal")
         if self.tts_timeout_seconds <= 0:
             raise ValueError("TTS_TIMEOUT_SECONDS must be positive")
         if self.tts_provider.casefold() == "opensource" and self.app_env != "development":

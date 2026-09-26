@@ -5,6 +5,7 @@ from os import getenv
 
 import httpx
 
+from app.domain.phonetics import apply_phonetic_transliteration
 from app.integrations.tts.router import AudioChunk, TTSProviderError
 
 
@@ -29,21 +30,26 @@ class OpenAISpeechProvider:
         return bool(self.api_key)
 
     async def synthesize_stream(
-        self, text: str, language: str, voice_id: str | None = None
+        self,
+        text: str,
+        language: str,
+        voice_id: str | None = None,
+        instructions_override: str | None = None,
     ) -> AsyncIterator[AudioChunk]:
         if not self.api_key:
             raise TTSProviderError("OPENAI_API_KEY is not configured")
         if not text.strip():
             return
         voice = voice_id or self.voice
-        instructions = (
+        instructions = instructions_override or (
             "Speak clearly and warmly for a Pakistani real-estate assistant. "
             "Use concise natural Urdu-English code-switching. Do not add words."
         )
+        normalized_text = apply_phonetic_transliteration(text)
         payload = {
             "model": self.model,
             "voice": voice,
-            "input": text,
+            "input": normalized_text,
             "instructions": instructions,
             "response_format": "pcm",
             "stream_format": "audio",

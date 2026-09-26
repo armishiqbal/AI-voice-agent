@@ -33,6 +33,7 @@ from sqlalchemy import select, text
 from app.agents.graph import EstateAgent
 from app.core.config import settings
 from app.core.observability import TraceStore
+from app.domain.emotions import infer_acoustic_emotion
 from app.domain.models import (
     AppointmentContactContext,
     AppointmentRequest,
@@ -69,6 +70,7 @@ from app.repositories.voice_outcomes import record_voice_call_outcome
 from app.services.appointments import redact_for_retention
 from app.services.voice_booking import VoiceBookingFlow
 from app.services.voice_sessions import VoiceSessionConsumeResult, VoiceSessionService
+from app.services.voice_stream import pipeline_synthesize_clauses
 
 if settings.app_env == "development":
     create_schema_for_local_development()
@@ -798,18 +800,36 @@ async def voice_socket(websocket: WebSocket):
             return
         decision_latency_ms = (time.perf_counter() - started) * 1000
         traces.observe("voice.decision_latency_ms", decision_latency_ms)
-        await websocket.send_json(
-            {
-                "type": "agent_response",
-                "decision": decision.model_dump(),
-                "latency_ms": round(decision_latency_ms, 2),
-            }
+        emotion = (
+            infer_acoustic_emotion(
+                text=text,
+                decision_kind=decision.kind,
+                intent=conversation_state.intent.value if conversation_state else None,
+                response_text=decision.spoken_text,
+            )
+            if settings.voice_emotion_matching_enabled
+            else None
         )
+        response_payload: dict[str, object] = {
+            "type": "agent_response",
+            "decision": decision.model_dump(),
+            "latency_ms": round(decision_latency_ms, 2),
+        }
+        if emotion is not None:
+            response_payload["emotion"] = emotion.as_dict()
+        await websocket.send_json(response_payload)
         first_audio_recorded = False
         end_to_first_audio_recorded = False
         tts_started_at = time.perf_counter()
         try:
-            async for chunk in session_tts.synthesize_stream(decision.spoken_text, language):
+            stream = pipeline_synthesize_clauses(
+                session_tts,
+                decision.spoken_text,
+                language=language,
+                emotion=emotion,
+                enabled=settings.voice_early_clause_streaming_enabled,
+            )
+            async for chunk in stream:
                 if chunk.audio and not first_audio_recorded:
                     active_audio_started = True
                     audio_ready_at = time.perf_counter()

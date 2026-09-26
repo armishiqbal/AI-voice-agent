@@ -1,1 +1,0 @@
-"""Awaaz Estate application package."""

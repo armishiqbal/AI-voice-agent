@@ -43,6 +43,8 @@ async def benchmark_provider(
                 received += len(chunk.audio)
                 chunk_count += 1
                 encodings.add(chunk.encoding)
+            if received == 0:
+                raise TTSProviderError("Provider returned no audio")
         except TTSProviderError as exc:
             error = str(exc)
         if audio_directory is not None and error is None and recording:

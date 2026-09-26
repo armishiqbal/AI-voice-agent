@@ -51,6 +51,8 @@ def build_tts_router(config: Settings) -> TTSRouter:
             config.fish_audio_api_key,
             model=config.fish_audio_model,
             sample_rate=config.fish_audio_sample_rate,
+            latency=config.fish_audio_latency,
+            default_reference_id=config.fish_audio_reference_id,
         )
         return TTSRouter(
             {"ur-Latn": provider, "ur-Arab": provider, "en": provider, "*": provider},

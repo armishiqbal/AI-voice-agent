@@ -4,6 +4,15 @@ export type AgentDecision = {
   property_ids?: string[];
 };
 
+export type AcousticEmotion = {
+  emotion: string;
+  speech_rate: number;
+  pitch_offset: number;
+  fish_audio_tag: string;
+  prompt_guidance: string;
+  description: string;
+};
+
 export type ServerEvent = {
   type: string;
   state?: string;
@@ -15,6 +24,7 @@ export type ServerEvent = {
   encoding?: string;
   sample_rate?: number;
   decision?: AgentDecision;
+  emotion?: AcousticEmotion;
   audio_input_available?: boolean;
   interrupt_playback?: boolean;
   voice_mode?: string;

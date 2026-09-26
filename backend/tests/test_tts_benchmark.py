@@ -16,6 +16,8 @@ class RecordingProvider:
     async def synthesize_stream(
         self, text: str, language: str, voice_id: str | None = None
     ) -> AsyncIterator[AudioChunk]:
+        if text == "empty":
+            return
         yield AudioChunk(0, b"one", language, encoding="audio/mpeg")
         if text == "fail":
             raise TTSProviderError("fixture failure")
@@ -32,3 +34,10 @@ async def test_benchmark_records_only_completed_streams(tmp_path: Path) -> None:
     assert rows[0].bytes_received == 6
     assert rows[1].error == "fixture failure"
     assert rows[1].total_ms is None
+
+
+@pytest.mark.asyncio
+async def test_empty_audio_is_not_a_success() -> None:
+    rows = await benchmark_provider(RecordingProvider(), [("empty", "empty")])
+    assert rows[0].error == "Provider returned no audio"
+    assert rows[0].total_ms is None
