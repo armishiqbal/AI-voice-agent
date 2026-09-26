@@ -9,6 +9,7 @@ response contract.
 - WhatsApp/SMS confirmations using the same appointment outbox and idempotency keys.
 - Salesforce/HubSpot connectors behind a reviewed CRM adapter and least-privilege credentials.
 - Lead scoring and follow-up campaigns built from consented preferences, not raw audio.
-- More voice packs and validated cloning for approved brand representatives.
+- Native-speaker-validated Urdu, English and Punjabi voice packs, including code-switching;
+  consented, licensed voice cloning for approved brand representatives.
 - Analytics dashboard for funnel conversion, provider latency, RAG misses, and booking outcomes.
 - Payment gateway and live MLS/ERP feeds with import provenance and rollback support.

@@ -2,7 +2,8 @@
 
 These flows describe the deterministic boundary around the voice model. The model may phrase a
 response, but it cannot decide availability, create an appointment, or disclose an unverified
-fact. Every consequential transition ends at a validated API form.
+fact. Every consequential transition passes through a validated service. Voice actions require
+explicit spoken confirmation and contact consent from the form.
 
 ## Buyer, rental, commercial, and investment
 
@@ -22,7 +23,7 @@ flowchart TD
   K -- Yes --> L[Grounded answer or clarify concern]
   K -- No --> M{Book a visit?}
   M -- No --> N[Continue conversation or goodbye]
-  M -- Yes --> O[Consent form and exact PKT slot]
+  M -- Yes --> O[Consented contact and exact spoken or form PKT confirmation]
   O --> P[Availability, employee, and idempotency validation]
   P --> Q[Appointment record and outbox event]
 ```
@@ -62,8 +63,12 @@ flowchart TD
   D -- No --> E[Reject without revealing appointment details]
   D -- Yes --> F{Action}
   F -- Reschedule --> G[Validate PKT business hours, half-hour slot, employee conflict]
-  F -- Cancel --> H[Mark cancelled]
-  G --> I[Write appointment.rescheduled outbox event]
+  F -- Cancel --> CONF[Ask explicit cancellation confirmation]
+  CONF --> RECHECK[Recheck reference and contact ownership]
+  RECHECK --> H[Mark cancelled]
+  G --> CONF2[Offer slots and ask explicit confirmation]
+  CONF2 --> RECHECK2[Recheck ownership and slot availability]
+  RECHECK2 --> I[Write appointment.rescheduled outbox event]
   H --> J[Write appointment.cancelled outbox event]
   I --> K[Worker retries Calendar/Gmail delivery]
   J --> K

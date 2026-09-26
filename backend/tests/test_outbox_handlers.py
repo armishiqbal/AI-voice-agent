@@ -127,27 +127,47 @@ def test_calendar_delivery_contains_client_context(monkeypatch) -> None:
     assert "+923001234567" in body["description"]
 
 
+def test_internal_handlers_do_not_claim_fake_whatsapp_delivery() -> None:
+    from app.workers.handlers import build_internal_handlers
+
+    assert "appointment.whatsapp_confirmation" not in build_internal_handlers()
+
+
 @pytest.mark.asyncio
-async def test_instant_whatsapp_booking_handler() -> None:
-    from app.workers.handlers import InstantWhatsAppBookingHandler
+async def test_delivery_graph_executes_real_tools_and_records_transitions(caplog) -> None:
+    import logging
 
-    cipher = ContactCipher()
-    phone_enc = cipher.encrypt("+923001234567")
-    handler = InstantWhatsAppBookingHandler(cipher=cipher)
+    calls: list[str] = []
 
-    payload = {
-        "reference": "AES-CONFIRM-99",
-        "property_id": "PROP-001",
-        "employee": "Ayesha Khan",
-        "client_name": "Haroon Shahid",
-        "contact_phone_ciphertext": phone_enc,
-        "starts_at": "2026-09-25T11:00:00+05:00",
-    }
+    class Calendar:
+        async def __call__(self, payload):
+            calls.append("calendar")
+            return {"provider": "google_calendar"}
 
-    result = await handler(payload)
-    assert result["status"] == "delivered"
-    assert result["reference"] == "AES-CONFIRM-99"
-    assert result["recipient"] == "+923001234567"
-    assert "AES-CONFIRM-99" in result["message"]
-    assert "PROP-001" in result["message"]
-    assert "maps.google.com" in result["message"]
+    class Email:
+        async def __call__(self, payload):
+            assert payload["_delivery_receipts"]["0:Calendar"]["provider"] == "google_calendar"
+            calls.append("email")
+            return {"provider": "gmail"}
+
+    class CRM:
+        async def __call__(self, payload):
+            assert "1:Email" in payload["_delivery_receipts"]
+            calls.append("crm")
+            return {"provider": "n8n"}
+
+    handler = CompositeOutboxHandler((Calendar(), Email(), CRM()))
+    assert {"deliver_0_Calendar", "deliver_1_Email", "deliver_2_CRM"}.issubset(
+        handler.graph.get_graph().nodes
+    )
+    with caplog.at_level(logging.INFO, logger="awaaz.delivery_graph"):
+        result = await handler({"reference": "PRIVATE-REFERENCE"})
+    assert calls == ["calendar", "email", "crm"]
+    assert len(result["integrations"]) == 3
+    assert "node=deliver_1_Email status=delivered" in caplog.text
+    assert "PRIVATE-REFERENCE" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_empty_delivery_graph_preserves_empty_result() -> None:
+    assert await CompositeOutboxHandler(())({}) == {"integrations": []}

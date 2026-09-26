@@ -1,4 +1,7 @@
-# Multilingual TTS: open-source runtime and evaluation
+# Optional local multilingual TTS: runtime and evaluation
+
+For the capstone Fish/ElevenLabs comparison, see [comparison](FISH_ELEVENLABS_COMPARISON.md).
+The browser also supports the configured OpenAI route; this document covers optional local workers.
 
 The selected implementation candidate is a hybrid local model path behind the existing TTS
 router. It is not yet a quality-approved model choice. The system must not claim support for a

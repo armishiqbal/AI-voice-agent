@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from time import monotonic, sleep
 from uuid import uuid4
@@ -490,3 +491,54 @@ def test_voice_session_records_separate_decision_tts_and_end_to_audio_latency(
     assert measurements["voice.end_of_turn_to_first_audio_ms"]
     assert measurements["voice.tts_stream_duration_ms"]
     assert measurements["voice.end_of_turn_to_first_audio_ms"][0] >= 0
+
+
+def test_openai_voice_buffers_audio_while_transcription_connects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    assert settings.voice_audio_queue_frames >= 128
+
+    class DelayedSTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            await asyncio.sleep(0.2)
+            async for frame in audio:
+                if frame == b"":
+                    yield STTEvent(text="Hello", is_final=True, speech_final=True)
+
+    class FakeTTS:
+        async def synthesize_stream(self, text: str, language: str):
+            del text
+            yield AudioChunk(sequence=0, audio=b"", language=language, sample_rate=24_000, is_final=True)
+
+    monkeypatch.setattr(api, "openai_voice_stt", DelayedSTT())
+    monkeypatch.setattr(api, "openai_voice_tts", FakeTTS())
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda conversation_id, text, language: AgentDecision(kind="answer", spoken_text="Hello"),
+    )
+    monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "openai")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        for _ in range(40):
+            websocket.send_bytes(b"\x01\x00" * 160)
+        websocket.send_json({"type": "audio_turn_end"})
+        events = []
+        while not any(event.get("type") == "agent_response" for event in events):
+            events.append(websocket.receive_json())
+
+    assert any(event.get("type") == "transcript" and event.get("is_final") for event in events)

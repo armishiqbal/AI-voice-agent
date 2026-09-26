@@ -33,7 +33,6 @@ from sqlalchemy import select, text
 from app.agents.graph import EstateAgent
 from app.core.config import settings
 from app.core.observability import TraceStore
-from app.domain.fixtures import demo_properties
 from app.domain.models import (
     AppointmentContactContext,
     AppointmentRequest,
@@ -45,7 +44,7 @@ from app.domain.models import (
     TelephonyCallRequest,
 )
 from app.evaluation.runner import load_cases, run_evaluation
-from app.integrations.llm import build_decision_provider
+from app.integrations.llm import LLMDecisionError, build_decision_provider
 from app.integrations.providers import all_tts_languages_ready, provider_readiness
 from app.integrations.rag import RAGProviderError, build_knowledge_store
 from app.integrations.stt import STTProviderError, build_openai_realtime_stt, build_stt_provider
@@ -74,8 +73,6 @@ from app.services.voice_sessions import VoiceSessionConsumeResult, VoiceSessionS
 if settings.app_env == "development":
     create_schema_for_local_development()
 properties = SqlPropertyRepository()
-if settings.app_env == "development" and properties.count() == 0:
-    properties.import_properties(demo_properties())
 appointments = SqlAppointmentService(properties)
 leads = LeadRepository()
 traces = TraceStore()
@@ -137,9 +134,11 @@ async def voice_option_readiness() -> dict[str, bool]:
         and standard_tts_ready,
         "openai_voice_ready": openai_audio_ready,
         "multilingual_tts": standard_tts_ready,
-        "live_voice_pipeline_ready": provider_status.deepgram
-        and provider_status.openai
-        and standard_tts_ready,
+        "live_voice_pipeline_ready": (
+            provider_status.deepgram
+            and provider_status.openai
+            and standard_tts_ready
+        ) or openai_audio_ready,
     }
 
 
@@ -254,18 +253,16 @@ async def readyz() -> dict[str, object]:
         if provider_status["standard_voice_ready"] or provider_status["openai_voice_ready"]
         else standard_blockers + ["OpenAI Realtime transcription and speech configuration"]
     )
+    live_voice_ready = (
+        provider_status["standard_voice_ready"] or provider_status["openai_voice_ready"]
+    )
     return {
-        # Process readiness is independent from optional live voice-provider readiness.
-        # Development can serve fixture-backed API calls without speech credentials.
-        "status": "ready" if database_ready else "degraded",
-        "mode": "demo-fixtures" if settings.app_env == "development" else "production",
+        "status": "ready" if database_ready and live_voice_ready else "degraded",
+        "mode": "live" if live_voice_ready else "blocked",
         "application": {"database_ready": database_ready},
         "live_voice": {
-            "configured": provider_status["standard_voice_ready"]
-            or provider_status["openai_voice_ready"],
-            "status": "configured"
-            if provider_status["standard_voice_ready"] or provider_status["openai_voice_ready"]
-            else "blocked",
+            "configured": live_voice_ready,
+            "status": "configured" if live_voice_ready else "blocked",
             "blockers": voice_blockers,
             "options": {
                 "standard": provider_status["standard_voice_ready"],
@@ -551,8 +548,13 @@ async def telephony_inbound(request: Request) -> Response:
 
 @app.post("/v1/conversations/{conversation_id}/turn")
 def conversation_turn(conversation_id: str, turn: ConversationTurn):
+    if agent.decision_provider is None:
+        raise HTTPException(status_code=503, detail="Live AI provider is not configured")
     started = time.perf_counter()
-    decision = agent.respond(conversation_id, turn.text, turn.language)
+    try:
+        decision = agent.respond(conversation_id, turn.text, turn.language)
+    except LLMDecisionError as error:
+        raise HTTPException(status_code=503, detail="Live AI provider could not complete this turn") from error
     latency_ms = (time.perf_counter() - started) * 1000
     traces.observe("rest.decision_latency_ms", latency_ms)
     transcripts.append(conversation_id, "user", turn.text)
@@ -722,13 +724,14 @@ async def voice_socket(websocket: WebSocket):
         await release_session_lease()
         raise
     active_task: asyncio.Task[None] | None = None
+    active_audio_started = False
     stt_task: asyncio.Task[None] | None = None
     audio_queue: asyncio.Queue[bytes | None] | None = None
     audio_started_at: float | None = None
     response_language = "ur-Latn"
 
     async def process_turn(text: str, language: str, turn_received_at: float) -> None:
-        nonlocal appointment_reference
+        nonlocal appointment_reference, active_audio_started
         started = time.perf_counter()
         try:
             decision = await asyncio.to_thread(agent.respond, conversation_id, text, language)
@@ -745,6 +748,19 @@ async def voice_socket(websocket: WebSocket):
                 selected_ids,
                 booking_contact,
                 conversation_id,
+                "; ".join(
+                    f"{name}: {value}"
+                    for name, value in (
+                        ("City", conversation_state.city),
+                        ("Area", conversation_state.area),
+                        ("Budget PKR", conversation_state.budget),
+                        ("Bedrooms", conversation_state.bedrooms),
+                        ("Size sqft", conversation_state.target_size_sqft),
+                        ("Amenities", ", ".join(conversation_state.amenities)),
+                        ("Investment goal", conversation_state.investment_goal),
+                    )
+                    if value is not None and value != ""
+                ) if conversation_state else "",
             )
             if booking_result is not None:
                 decision = booking_result.decision
@@ -756,7 +772,7 @@ async def voice_socket(websocket: WebSocket):
                             else booking_flow.property_choices
                         }
                     )
-                if booking_flow.phase == "slots":
+                if booking_flow.phase in {"slots", "manage_slots"}:
                     await websocket.send_json(
                         {
                             "type": "booking_slots",
@@ -795,6 +811,7 @@ async def voice_socket(websocket: WebSocket):
         try:
             async for chunk in session_tts.synthesize_stream(decision.spoken_text, language):
                 if chunk.audio and not first_audio_recorded:
+                    active_audio_started = True
                     audio_ready_at = time.perf_counter()
                     traces.observe(
                         "voice.first_audio_latency_ms", (audio_ready_at - started) * 1000
@@ -830,8 +847,10 @@ async def voice_socket(websocket: WebSocket):
             )
         await websocket.send_json({"type": "state", "state": "listening"})
 
-    def cancel_active() -> float | None:
+    def cancel_active(*, only_after_audio: bool = False) -> float | None:
         if active_task is None or active_task.done():
+            return None
+        if only_after_audio and not active_audio_started:
             return None
         cancel_started = time.perf_counter()
         active_task.cancel()
@@ -845,7 +864,7 @@ async def voice_socket(websocket: WebSocket):
             yield chunk
 
     async def consume_stt(queue: asyncio.Queue[bytes | None]) -> None:
-        nonlocal active_task, audio_started_at
+        nonlocal active_task, active_audio_started, audio_started_at
         try:
             async for event in session_stt.stream(audio_stream(queue)):
                 if event.speech_started:
@@ -897,6 +916,7 @@ async def voice_socket(websocket: WebSocket):
                         continue
                     cancel_started = cancel_active()
                     turn_received_at = time.perf_counter()
+                    active_audio_started = False
                     active_task = asyncio.create_task(
                         process_turn(event.text, response_language, turn_received_at)
                     )
@@ -1007,7 +1027,7 @@ async def voice_socket(websocket: WebSocket):
                     except asyncio.QueueFull:
                         await websocket.close(code=1013, reason="Audio input queue is full")
                         break
-                cancel_started = cancel_active()
+                cancel_started = cancel_active(only_after_audio=True)
                 await websocket.send_json(
                     {
                         "type": "state",

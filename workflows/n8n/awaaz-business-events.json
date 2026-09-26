@@ -1,0 +1,158 @@
+{
+  "name": "Awaaz Call to Appointment CRM Completion",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "awaaz-crm-events",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "incoming",
+      "name": "After Call Intent Property Appointment",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body;\nif (!body || !/^[a-f0-9]{64}$/.test(body.event_id || '') || !body.event) throw new Error('Invalid event envelope');\nconst allowed = ['appointment.booked', 'appointment.rescheduled', 'appointment.cancelled', 'lead.created', 'voice.call_completed'];\nif (!allowed.includes(body.event.event_type)) throw new Error('Unsupported event');\nif (body.event.event_type.startsWith('appointment.')) {\n  const receipts = Object.values(body.upstream_deliveries || {});\n  if (!receipts.some(x => x && x.provider === 'google_calendar')) throw new Error('Calendar delivery not confirmed');\n  if (!receipts.some(x => x && x.provider === 'gmail')) throw new Error('Employee email delivery not confirmed');\n}\nreturn [{json: body}];"
+      },
+      "id": "validate",
+      "name": "Validate Calendar and Email Receipts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AWAAZ_CRM_WEBHOOK_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.event_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({event_id: $json.event_id, ...$json.event}) }}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        }
+      },
+      "id": "crm",
+      "name": "Idempotent CRM Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $('Validate Calendar and Email Receipts').first().json;\nif ($json.event_id !== original.event_id || $json.status !== 'delivered') throw new Error('CRM did not confirm durable delivery');\nreturn [{json: {event_id: original.event_id, status: 'delivered'}}];"
+      },
+      "id": "ack",
+      "name": "Require Durable CRM Acknowledgement",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond",
+      "name": "Acknowledge Outbox",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1040,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "After Call Intent Property Appointment": {
+      "main": [
+        [
+          {
+            "node": "Validate Calendar and Email Receipts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Calendar and Email Receipts": {
+      "main": [
+        [
+          {
+            "node": "Idempotent CRM Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Idempotent CRM Update": {
+      "main": [
+        [
+          {
+            "node": "Require Durable CRM Acknowledgement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Require Durable CRM Acknowledgement": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Outbox",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none"
+  },
+  "pinData": {},
+  "tags": []
+}

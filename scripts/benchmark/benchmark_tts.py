@@ -15,6 +15,7 @@ from pathlib import Path
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--phrase", action="append", help="Additional phrase; repeat for a custom set")
+    parser.add_argument("--audio-dir", type=Path, help="Save synthetic benchmark recordings for blinded review")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root / "backend"))
@@ -68,7 +69,7 @@ if __name__ == "__main__":
             FishAudioStreamingProvider(settings.fish_audio_api_key, settings.fish_audio_model, settings.fish_audio_sample_rate),
             ElevenLabsStreamingProvider(settings.elevenlabs_api_key, settings.elevenlabs_voice_id or "", settings.elevenlabs_model),
         ):
-            rows.extend(await benchmark_provider(provider, phrases))
+            rows.extend(await benchmark_provider(provider, phrases, args.audio_dir))
         print(
             json.dumps(
                 {

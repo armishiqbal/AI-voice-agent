@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Awaitable, Callable, Sequence
+from typing import TypedDict
+
+from langgraph.graph import END, START, StateGraph
 
 from app.core.config import Settings
 from app.integrations.calendar import GoogleCalendarHandler
 from app.integrations.gmail import GmailNotificationHandler
-from app.workers.outbox import OutboxHandler
+from app.integrations.n8n import N8nCrmHandler
+from app.workers.outbox import OutboxHandler, PartialDeliveryError
 
 APPOINTMENT_EVENTS = (
     "appointment.booked",
@@ -15,7 +20,7 @@ APPOINTMENT_EVENTS = (
 
 
 class InternalCrmLeadHandler:
-    """Local CRM-ready sink used when n8n is intentionally out of scope."""
+    """Local CRM-ready sink retaining the durable lead record."""
 
     async def __call__(self, payload: dict[str, object]) -> dict[str, object]:
         lead_id = payload.get("lead_id")
@@ -34,53 +39,63 @@ class InternalCrmCallOutcomeHandler:
         return {"provider": "internal_crm_log", "call_id": call_id, "status": "recorded"}
 
 
-class InstantWhatsAppBookingHandler:
-    """Dispatches instant WhatsApp confirmation receipt with Google Maps pin, booking reference, and consultant card."""
+class DeliveryState(TypedDict):
+    payload: dict[str, object]
+    receipts: dict[str, object]
 
-    def __init__(self, cipher: object | None = None) -> None:
-        from app.core.pii import ContactCipher
-        self.cipher = cipher or ContactCipher()
 
-    async def __call__(self, payload: dict[str, object]) -> dict[str, object]:
-        ref = str(payload.get("reference", ""))
-        prop_id = str(payload.get("property_id", ""))
-        employee = str(payload.get("employee", "Ayesha Khan"))
-        client_name = str(payload.get("client_name", "Valued Client"))
-        phone_cipher = payload.get("contact_phone_ciphertext")
-        phone = self.cipher.decrypt(str(phone_cipher)) if phone_cipher else "Direct Contact"
-        starts_at = str(payload.get("starts_at", ""))
-
-        maps_link = (
-            "https://maps.google.com/?q=24.8138,67.0305"
-            if "clifton" in prop_id.lower() or "demo-001" in prop_id.lower()
-            else "https://maps.google.com/?q=31.4697,74.4103"
-        )
-
-        return {
-            "provider": "whatsapp_meta_cloud",
-            "reference": ref,
-            "status": "delivered",
-            "recipient": phone,
-            "message": (
-                f"Assalam-o-Alaikum {client_name}! Your site visit for property {prop_id} has been confirmed. "
-                f"Booking Ref: {ref}. Slot: {starts_at}. "
-                f"Assigned Consultant: {employee}. "
-                f"Location Pin: {maps_link}"
-            ),
-        }
+_delivery_logger = logging.getLogger("awaaz.delivery_graph")
 
 
 class CompositeOutboxHandler:
-    """Deliver one appointment event to every configured external integration."""
+    """Execute configured integration tools as an ordered LangGraph delivery graph.
+
+    SQL outbox leases/retry metadata remain authoritative. The graph consumes
+    saved provider receipts so downstream retries do not repeat completed tools.
+    """
 
     def __init__(self, handlers: Sequence[OutboxHandler]) -> None:
         self.handlers = tuple(handlers)
+        graph = StateGraph(DeliveryState)
+        previous = START
+        for index, handler in enumerate(self.handlers):
+            node_name = f"deliver_{index}_{type(handler).__name__}"
+            receipt_key = f"{index}:{type(handler).__name__}"
+            graph.add_node(node_name, self._delivery_node(handler, receipt_key, node_name))
+            graph.add_edge(previous, node_name)
+            previous = node_name
+        graph.add_edge(previous, END)
+        self.graph = graph.compile()
+
+    @staticmethod
+    def _delivery_node(
+        handler: OutboxHandler, key: str, node_name: str
+    ) -> Callable[[DeliveryState], Awaitable[DeliveryState]]:
+        async def deliver(state: DeliveryState) -> DeliveryState:
+            receipts = dict(state["receipts"])
+            if key in receipts:
+                _delivery_logger.info("delivery_node node=%s status=replayed_receipt", node_name)
+                return {"payload": state["payload"], "receipts": receipts}
+            try:
+                receipts[key] = await handler({**state["payload"], "_delivery_receipts": receipts})
+            except Exception as error:
+                _delivery_logger.warning("delivery_node node=%s status=failed", node_name)
+                raise PartialDeliveryError(receipts, error) from error
+            _delivery_logger.info("delivery_node node=%s status=delivered", node_name)
+            return {"payload": state["payload"], "receipts": receipts}
+
+        return deliver
 
     async def __call__(self, payload: dict[str, object]) -> dict[str, object]:
-        deliveries: list[dict[str, object]] = []
-        for handler in self.handlers:
-            deliveries.append(await handler(payload))
-        return {"integrations": deliveries}
+        previous = payload.get("_delivery_receipts", {})
+        receipts: dict[str, object] = dict(previous) if isinstance(previous, dict) else {}
+        result = await self.graph.ainvoke({"payload": payload, "receipts": receipts})
+        return {
+            "integrations": [
+                result["receipts"][f"{index}:{type(handler).__name__}"]
+                for index, handler in enumerate(self.handlers)
+            ]
+        }
 
 
 def build_outbox_handlers(config: Settings) -> dict[str, OutboxHandler]:
@@ -95,10 +110,19 @@ def build_outbox_handlers(config: Settings) -> dict[str, OutboxHandler]:
             integrations.append(
                 GmailNotificationHandler(config.google_token_path, config.gmail_sender)
             )
+    handlers: dict[str, OutboxHandler] = {}
     if integrations:
+        if config.n8n_webhook_url and config.n8n_webhook_token:
+            integrations.append(N8nCrmHandler(config.n8n_webhook_url, config.n8n_webhook_token))
         composite = CompositeOutboxHandler(integrations)
-        return {event_type: composite for event_type in APPOINTMENT_EVENTS}
-    return {}
+        handlers.update({event_type: composite for event_type in APPOINTMENT_EVENTS})
+    if config.n8n_webhook_url and config.n8n_webhook_token:
+        sink = N8nCrmHandler(config.n8n_webhook_url, config.n8n_webhook_token)
+        handlers["lead.created"] = CompositeOutboxHandler((InternalCrmLeadHandler(), sink))
+        handlers["voice.call_completed"] = CompositeOutboxHandler(
+            (InternalCrmCallOutcomeHandler(), sink)
+        )
+    return handlers
 
 
 def build_internal_handlers() -> dict[str, OutboxHandler]:
@@ -106,5 +130,4 @@ def build_internal_handlers() -> dict[str, OutboxHandler]:
     return {
         "lead.created": InternalCrmLeadHandler(),
         "voice.call_completed": InternalCrmCallOutcomeHandler(),
-        "appointment.whatsapp_confirmation": InstantWhatsAppBookingHandler(),
     }

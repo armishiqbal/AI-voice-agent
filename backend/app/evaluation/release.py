@@ -4,16 +4,19 @@ import asyncio
 from pathlib import Path
 
 from app.agents.graph import EstateAgent
+from app.core.config import Settings
 from app.evaluation.appointments import run_appointment_evaluation
+from app.evaluation.conversations import load_conversation_cases, run_conversation_evaluation
 from app.evaluation.memory import load_memory_cases, run_memory_evaluation
 from app.evaluation.rag import load_rag_cases, run_sql_baseline
 from app.evaluation.runner import load_cases, run_evaluation
 from app.integrations.providers import all_tts_languages_ready, provider_readiness
-from app.integrations.tts import build_tts_router
+from app.integrations.stt import build_openai_realtime_stt
+from app.integrations.tts import build_openai_tts_router, build_tts_router
 from app.services.appointments import PropertyRepository
 
 
-def build_release_report(root: Path, config: object) -> dict[str, object]:
+def build_release_report(root: Path, config: Settings) -> dict[str, object]:
     """Return an evidence-scoped report with live provider readiness probes."""
     repository = PropertyRepository()
     safety = run_evaluation(
@@ -29,18 +32,28 @@ def build_release_report(root: Path, config: object) -> dict[str, object]:
         load_memory_cases(root / "evals" / "memory.json"),
     )
     appointments = run_appointment_evaluation()
+    conversations = run_conversation_evaluation(load_conversation_cases(root / "evals" / "multiturn_conversations.json"))
     readiness = provider_readiness(config)
     tts_ready = readiness.multilingual_tts and asyncio.run(
         all_tts_languages_ready(build_tts_router(config))
     )
+    async def openai_audio_ready() -> bool:
+        routes = await build_openai_tts_router(config).readiness()
+        return readiness.openai and await build_openai_realtime_stt(config).is_ready() and routes.get("*", False)
+
+    openai_ready = asyncio.run(openai_audio_ready())
+    standard_ready = readiness.deepgram and readiness.openai and tts_ready
     providers = {
         **readiness.__dict__,
         "multilingual_tts": tts_ready,
-        "live_voice_pipeline_ready": readiness.deepgram and readiness.openai and tts_ready,
+        "standard_voice_ready": standard_ready,
+        "openai_voice_ready": openai_ready,
+        "live_voice_pipeline_ready": standard_ready or openai_ready,
     }
     live_voice_ready = bool(providers["live_voice_pipeline_ready"])
     return {
         "scope": "local-implementation-with-live-prerequisite-status",
+        "evidence_limits": ["Fixture evaluations do not prove real company grounding", "Provider readiness does not prove a completed voice turn", "Hallucination baseline measures unexpected property IDs, not every prose claim"],
         "gates": {
             "safety": {
                 "status": "passed locally"
@@ -95,6 +108,7 @@ def build_release_report(root: Path, config: object) -> dict[str, object]:
             },
         },
         "provider_readiness": providers,
+        "multiturn_conversations": conversations,
         "fixture_evaluation": safety,
         "sql_retrieval_baseline": retrieval,
         "memory_evaluation": memory,

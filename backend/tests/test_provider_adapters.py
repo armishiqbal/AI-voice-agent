@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
+import pytest
+
 from app.core.config import Settings
 from app.integrations.llm import build_decision_provider
 from app.integrations.rag import build_knowledge_store
@@ -86,3 +91,42 @@ def test_open_source_tts_routes_arabic_separately_from_indic_languages() -> None
     assert router.providers["ar"].name == "opensource-chatterbox"
     assert router.providers["ur-Latn"].name == "opensource-parler"
     assert router.providers["bn"].name == "opensource-parler"
+
+
+@pytest.mark.asyncio
+async def test_openai_realtime_stt_finishes_if_empty_input_has_no_more_server_events(monkeypatch) -> None:
+    import websockets.asyncio.client
+
+    class Connection:
+        def __init__(self) -> None:
+            self.events: asyncio.Queue[str] = asyncio.Queue()
+
+        async def send(self, value: str) -> None:
+            message = json.loads(value)
+            if message["type"] == "session.update":
+                await self.events.put(json.dumps({"type": "session.updated"}))
+
+        async def recv(self) -> str:
+            return await self.events.get()
+
+    connection = Connection()
+
+    class ConnectionContext:
+        async def __aenter__(self):
+            return connection
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(websockets.asyncio.client, "connect", lambda *args, **kwargs: ConnectionContext())
+
+    async def empty_audio():
+        if False:
+            yield b""
+
+    from app.integrations.stt.openai_realtime import OpenAIRealtimeSTT
+
+    async def collect():
+        return [event async for event in OpenAIRealtimeSTT("test-key").stream(empty_audio())]
+
+    assert await asyncio.wait_for(collect(), timeout=2) == []

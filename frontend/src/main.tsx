@@ -5,6 +5,7 @@ import { OrbitalLaserBeams } from "./OrbitalLaserBeams";
 import { WaveformVisualizer } from "./WaveformVisualizer";
 import { BrowserAudioCapture, BrowserAudioPlayback } from "./voiceAudio";
 import { parseServerEvent, shouldInterruptPlayback, audioUplinkState } from "./voiceProtocol";
+import { closeVoiceSession, resolveLiveVoiceAction } from "./voiceConversation";
 import { BoundedAudioReplay } from "./voiceReplay";
 import { PropertyComparisonHUD } from "./PropertyComparisonHUD";
 import { PropertyMapRadar } from "./PropertyMapRadar";
@@ -91,7 +92,7 @@ const paths = {
 
 const voicePhaseLabels: Record<VoicePhase, string> = {
   checking: "Establishing orbital connection…",
-  blocked: "Voice active via command dock below",
+  blocked: "Live voice is unavailable. Check provider readiness before starting a call.",
   idle: "Awaaz Neural Orbit Ready — Click Orb to speak",
   connecting: "Connecting voice session…",
   authenticating: "Authenticating security token…",
@@ -117,9 +118,11 @@ function App() {
   const [propertyDetails, setPropertyDetails] = useState<Record<string, Property>>({});
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [voiceMode, setVoiceMode] = useState<VoiceMode>("openai");
+  const [voiceMode] = useState<VoiceMode>("openai");
   const [language, setLanguage] = useState<"ur-Latn" | "ur-Arab" | "en" | "hi" | "ar" | "pa" | "bn">("ur-Latn");
   const [audioAvailable, setAudioAvailable] = useState(false);
+  const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
+  const [selectedInputId, setSelectedInputId] = useState("");
   const [audioOutputUnavailable, setAudioOutputUnavailable] = useState(false);
   const [appointmentStatus, setAppointmentStatus] = useState("");
   const [appointmentTone, setAppointmentTone] = useState<FeedbackTone>("info");
@@ -131,36 +134,11 @@ function App() {
   const [showCompareHUD, setShowCompareHUD] = useState(false);
   const [showMapRadar, setShowMapRadar] = useState(false);
   const [showMortgageCalc, setShowMortgageCalc] = useState(false);
-  const [speechRate, setSpeechRate] = useState<number>(1.0);
-  const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(42);
-  const [isRecognizing, setIsRecognizing] = useState(false);
+  const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
-  const [voicePersona, setVoicePersona] = useState<"ayesha" | "zayan">("ayesha");
   const [audioAnalyser, setAudioAnalyser] = useState<AnalyserNode | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
-  const localMicStream = useRef<MediaStream | null>(null);
-  const localMicCtx = useRef<AudioContext | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const browserRecognition = useRef<any>(null);
-  const latestTranscriptRef = useRef("");
-  const hasSubmittedTurn = useRef(false);
-  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-
-  // Pre-warm Web Speech API voices
-  useEffect(() => {
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.getVoices();
-      const handleVoices = () => {
-        window.speechSynthesis.getVoices();
-      };
-      window.speechSynthesis.onvoiceschanged = handleVoices;
-      return () => {
-        if (window.speechSynthesis.onvoiceschanged === handleVoices) {
-          window.speechSynthesis.onvoiceschanged = null;
-        }
-      };
-    }
-  }, []);
+  const httpTurnAbort = useRef<AbortController | null>(null);
 
   const getTomorrowDefaultIso = () => {
     const d = new Date();
@@ -183,6 +161,8 @@ function App() {
   const bookingDialog = useRef<HTMLDialogElement | null>(null);
   const replayAudio = useRef(new BoundedAudioReplay());
   const capture = useRef<BrowserAudioCapture | null>(null);
+  const finishSpeech = useRef<(() => void) | null>(null);
+  const selectedInputRef = useRef("");
   const playback = useRef(new BrowserAudioPlayback());
   const languageRef = useRef(language);
   const voiceModeRef = useRef<VoiceMode>(voiceMode);
@@ -191,11 +171,7 @@ function App() {
   const connected = socket?.readyState === WebSocket.OPEN;
   const readinessKey = voiceMode === "openai" ? "openai_voice_ready" : "standard_voice_ready";
   const voiceReady = runtimeReadiness?.providers[readinessKey] === true;
-  const displayVoicePhase: VoicePhase = audioOutputUnavailable
-    ? "error"
-    : isRecognizing
-    ? "listening"
-    : voicePhase;
+  const displayVoicePhase: VoicePhase = audioOutputUnavailable ? "error" : voicePhase;
 
   useEffect(() => {
     voiceModeRef.current = voiceMode;
@@ -217,9 +193,13 @@ function App() {
             map[item.id] = item;
             ids.push(item.id);
           }
-          setPropertyDetails((prev) => ({ ...map, ...prev }));
+          setPropertyDetails(map);
           setMatches(ids);
-          if (ids.length > 0) setSelectedPropertyId(ids[0]);
+          setSelectedPropertyId(ids[0] ?? "");
+        } else {
+          setPropertyDetails({});
+          setMatches([]);
+          setSelectedPropertyId("");
         }
       })
       .catch(() => undefined);
@@ -252,11 +232,7 @@ function App() {
       } catch {
         if (active) {
           setRuntimeReadiness(null);
-          setVoicePhase((current) =>
-            ["connecting", "authenticating", "listening", "thinking", "speaking", "error"].includes(current)
-              ? current
-              : "idle"
-          );
+          setVoicePhase("blocked");
         }
       }
     };
@@ -281,6 +257,15 @@ function App() {
     capture.current = nextCapture;
     let audioSessionStarted = false;
     let stoppedForBackpressure = false;
+    let manuallyCommitted = false;
+    let silentInputMs = 0;
+    let inputSignalSeen = false;
+    finishSpeech.current = () => {
+      if (capture.current !== nextCapture || ws.readyState !== WebSocket.OPEN) return;
+      manuallyCommitted = true;
+      ws.send(JSON.stringify({ type: "audio_turn_end" }));
+      setActiveActionLabel("LIVE ACTION: PROCESSING YOUR SPEECH");
+    };
     try {
       await nextCapture.start(
         (chunk) => {
@@ -290,6 +275,7 @@ function App() {
             stoppedForBackpressure = true;
             nextCapture.stop();
             capture.current = null;
+            finishSpeech.current = null;
             if (audioSessionStarted && ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ type: "audio_end" }));
             }
@@ -303,6 +289,7 @@ function App() {
             stoppedForBackpressure = true;
             nextCapture.stop();
             if (capture.current === nextCapture) capture.current = null;
+            finishSpeech.current = null;
             setAudioAvailable(false);
             setActiveActionLabel("MICROPHONE STREAM PAUSED");
           }
@@ -316,28 +303,59 @@ function App() {
         mode === "openai"
           ? {
               onSpeechStart: () => {
+                manuallyCommitted = false;
                 setActiveActionLabel("LIVE ACTION: USER SPEAKING INTO ORBIT");
                 if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "audio_turn_start" }));
               },
               onSpeechEnd: () => {
+                if (manuallyCommitted) {
+                  manuallyCommitted = false;
+                  return;
+                }
                 setActiveActionLabel("LIVE ACTION: PROCESSING NEURAL TURN");
                 if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "audio_turn_end" }));
               },
+              onLevel: (rms, frameMs) => {
+                if (inputSignalSeen) return;
+                if (rms >= 0.0001) {
+                  inputSignalSeen = true;
+                } else {
+                  silentInputMs += frameMs;
+                  if (silentInputMs >= 4_000 && silentInputMs - frameMs < 4_000) {
+                    setActiveActionLabel("NO MIC SOUND DETECTED — SPEAK OR SELECT MICROPHONE");
+                  }
+                }
+              },
+              onCaptureStalled: () => {
+                if (capture.current !== nextCapture) return;
+                capture.current = null;
+                finishSpeech.current = null;
+                setAudioAvailable(false);
+                setAudioAnalyser(null);
+                setActiveActionLabel("MICROPHONE STREAM STOPPED — RESTART VOICE CHAT");
+                if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "audio_end" }));
+              },
             }
-          : undefined
+          : undefined,
+        selectedInputRef.current,
       );
       if (ws.readyState !== WebSocket.OPEN || capture.current !== nextCapture) {
         nextCapture.stop();
         if (capture.current === nextCapture) capture.current = null;
+        finishSpeech.current = null;
         setAudioAnalyser(null);
         return;
       }
       setAudioAvailable(true);
       setAudioAnalyser(nextCapture.getAnalyser());
       setActiveActionLabel("LIVE ORBITAL LINK ACTIVE — SPEAK FREELY");
+      void navigator.mediaDevices.enumerateDevices()
+        .then((devices) => setAudioInputs(devices.filter((device) => device.kind === "audioinput")))
+        .catch(() => undefined);
     } catch {
       nextCapture.stop();
       if (capture.current === nextCapture) capture.current = null;
+      finishSpeech.current = null;
       if (audioSessionStarted && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "audio_end" }));
       }
@@ -345,6 +363,17 @@ function App() {
       setAudioAnalyser(null);
       setActiveActionLabel("MICROPHONE UNAVAILABLE — TYPE IN COMMAND DOCK");
     }
+  }
+
+  function changeInputDevice(deviceId: string) {
+    selectedInputRef.current = deviceId;
+    setSelectedInputId(deviceId);
+    if (socket?.readyState !== WebSocket.OPEN || !capture.current) return;
+    capture.current.stop();
+    capture.current = null;
+    finishSpeech.current = null;
+    setAudioAvailable(false);
+    void startCapture(socket, voiceModeRef.current);
   }
 
   async function connect() {
@@ -395,20 +424,26 @@ function App() {
         setActiveActionLabel("ORBITAL LINK ESTABLISHED — READY");
       };
       ws.onclose = (event) => {
+        if (event.code !== 1000) {
+          console.warn("Voice WebSocket closed", {
+            code: event.code, reason: event.reason, wasClean: event.wasClean, url: wsUrl,
+          });
+        }
         setConnecting(false);
         capture.current?.stop();
         capture.current = null;
+        finishSpeech.current = null;
         setSocket(null);
         setAudioAvailable(false);
         if (event.code === 1013) {
           setVoicePhase("error");
-          setActiveActionLabel("ORBIT CAPACITY REACHED — RETRY SHORTLY");
+          setActiveActionLabel(event.reason || "VOICE SERVICE BUSY — RETRY SHORTLY");
         } else if (event.code === 1008) {
           setVoicePhase("error");
           setActiveActionLabel(event.reason ? `REJECTED: ${event.reason}` : "AUTHENTICATION FAILED");
         } else if (event.code !== 1000) {
           setVoicePhase("error");
-          setActiveActionLabel(event.reason ? `DISCONNECTED: ${event.reason}` : "SESSION ENDED");
+          setActiveActionLabel(event.reason ? `DISCONNECTED (${event.code}): ${event.reason}` : `VOICE CONNECTION LOST (${event.code}) — CHECK API AND NETWORK`);
         } else {
           setVoicePhase("idle");
           setActiveActionLabel("ORBITAL SESSION CLOSED — READY");
@@ -482,11 +517,10 @@ function App() {
           setActiveActionLabel("REPLY TEXT IS READY — SPOKEN AUDIO IS UNAVAILABLE");
         }
         if (event.type === "appointment_result") {
-          setAppointmentTone(event.status === "test_booked" ? "success" : "pending");
-          const msg =
-            event.status === "test_booked"
-              ? `VISIT CONFIRMED: REF ${event.reference ?? ""}`
-              : `VISIT REQUESTED: REF ${event.reference ?? ""}`;
+          setAppointmentTone("pending");
+          const actionLabel = event.action === "cancellation" ? "CANCELLATION REQUESTED"
+            : event.action === "reschedule" ? "RESCHEDULE REQUESTED" : "VISIT REQUESTED";
+          const msg = `${actionLabel}: REF ${event.reference ?? ""} — CALENDAR/EMAIL PENDING`;
           setAppointmentStatus(msg);
           setActiveActionLabel(`ACTION: ${msg}`);
         }
@@ -583,225 +617,14 @@ function App() {
   }
 
   function unlockAudio() {
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-      }
-    }
     void playback.current.activate().catch(() => undefined);
   }
 
-  function speakText(text: string) {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    try {
-      window.speechSynthesis.cancel();
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-      }
-      const clean = text.replace(/[*_#`]/g, " ").replace(/\s+/g, " ").trim();
-      if (!clean) return;
-
-      const utterance = new SpeechSynthesisUtterance(clean);
-      // Keep global reference so browser garbage collection doesn't terminate utterance prematurely
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (window as any).__activeUtterance = utterance;
-      activeUtteranceRef.current = utterance;
-      utterance.rate = (voicePersona === "zayan" ? 1.05 : 1.0) * speechRate;
-      utterance.pitch = voicePersona === "zayan" ? 0.9 : 1.05;
-
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const matchVoice =
-          voices.find(
-            (v) =>
-              (v.lang.startsWith("en-") && (v.lang.includes("PK") || v.lang.includes("IN"))) ||
-              v.lang.startsWith("ur") ||
-              v.lang.startsWith("hi")
-          ) ||
-          voices.find((v) => v.lang.startsWith("en-US") || v.lang.startsWith("en-GB")) ||
-          voices.find((v) => v.lang.startsWith("en")) ||
-          voices[0];
-        if (matchVoice) {
-          utterance.voice = matchVoice;
-          utterance.lang = matchVoice.lang;
-        }
-      } else {
-        utterance.lang = "en-US";
-      }
-
-      utterance.onstart = () => {
-        setVoicePhase("speaking");
-      };
-      utterance.onend = () => {
-        activeUtteranceRef.current = null;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).__activeUtterance = null;
-        setVoicePhase("idle");
-      };
-      utterance.onerror = () => {
-        activeUtteranceRef.current = null;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (window as any).__activeUtterance = null;
-        setVoicePhase("idle");
-      };
-
-      // Slight timeout prevents Chromium race where cancel() destroys the new utterance
-      setTimeout(() => {
-        if (window.speechSynthesis.paused) {
-          window.speechSynthesis.resume();
-        }
-        window.speechSynthesis.speak(utterance);
-      }, 35);
-    } catch {
-      setVoicePhase("idle");
-    }
-  }
-
-  function startBrowserSpeech() {
-    if (typeof window === "undefined") return;
-    unlockAudio();
-    playFuturisticTone("listening");
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const SpeechRecognitionClass =
-      (window as unknown as { SpeechRecognition?: any; webkitSpeechRecognition?: any }).SpeechRecognition ||
-      (window as unknown as { SpeechRecognition?: any; webkitSpeechRecognition?: any }).webkitSpeechRecognition;
-    if (!SpeechRecognitionClass) {
-      setActiveActionLabel("ORBIT ACTIVATED — INTRODUCING PROPERTIES");
-      void send("Assalam-o-Alaikum! Tell me about Awaaz Estate verified properties.");
-      return;
-    }
-
-    try {
-      if (browserRecognition.current) {
-        try {
-          browserRecognition.current.abort();
-        } catch {
-          // ignore
-        }
-        browserRecognition.current = null;
-      }
-
-      const recognition = new SpeechRecognitionClass();
-      browserRecognition.current = recognition;
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      recognition.maxAlternatives = 1;
-      // When Roman Urdu or English is chosen, en-US accurately captures Latin vocabulary without dropping words
-      recognition.lang = language === "ur-Arab" ? "ur-PK" : "en-US";
-
-      latestTranscriptRef.current = "";
-      hasSubmittedTurn.current = false;
-
-      recognition.onstart = () => {
-        setIsRecognizing(true);
-        setVoicePhase("listening");
-        setActiveActionLabel("LIVE ACTION: ORBIT LISTENING TO SPEECH…");
-        if (typeof navigator !== "undefined" && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-          navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
-            localMicStream.current = stream;
-            const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-            if (AudioCtx) {
-              const ctx = new AudioCtx();
-              localMicCtx.current = ctx;
-              const src = ctx.createMediaStreamSource(stream);
-              const analyser = ctx.createAnalyser();
-              analyser.fftSize = 128;
-              src.connect(analyser);
-              setAudioAnalyser(analyser);
-            }
-          }).catch(() => undefined);
-        }
-      };
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      recognition.onresult = (event: any) => {
-        let interimText = "";
-        let finalText = "";
-        for (let i = 0; i < event.results.length; ++i) {
-          const res = event.results[i];
-          if (res.isFinal) {
-            finalText += res[0]?.transcript || "";
-          } else {
-            interimText += res[0]?.transcript || "";
-          }
-        }
-        const currentText = (finalText || interimText).trim();
-        if (currentText) {
-          latestTranscriptRef.current = currentText;
-          setSubtitles(currentText);
-          setActiveActionLabel(`HEARING: "${currentText.slice(0, 36)}"`);
-          detectAndHighlightAction(currentText);
-        }
-      };
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      recognition.onerror = (event: any) => {
-        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-          setActiveActionLabel("MIC PERMISSION REQUIRED — CLICK TO ENABLE");
-        } else if (event.error !== "no-speech") {
-          setActiveActionLabel(`MIC STATUS: ${event.error || "ended"}`);
-        }
-      };
-
-      recognition.onend = () => {
-        setIsRecognizing(false);
-        cleanupLocalMic();
-        if (hasSubmittedTurn.current) return;
-        hasSubmittedTurn.current = true;
-        const transcript = latestTranscriptRef.current.trim();
-        if (transcript) {
-          setActiveActionLabel(`ORBIT EXECUTING: "${transcript.slice(0, 32)}"`);
-          void send(transcript);
-        } else {
-          // If listening ended and nothing was captured, prompt the user so the agent always answers!
-          setActiveActionLabel("ORBIT RESPONDING — ASSISTING USER");
-          void send("Assalam-o-Alaikum! Tell me about Awaaz Estate verified properties.");
-        }
-      };
-
-      recognition.start();
-    } catch {
-      cleanupLocalMic();
-      setIsRecognizing(false);
-      setVoicePhase("idle");
-      setActiveActionLabel("ORBIT RESPONDING — ASSISTING USER");
-      void send("Assalam-o-Alaikum! Tell me about Awaaz Estate verified properties.");
-    }
-  }
-
-  function cleanupLocalMic() {
-    if (localMicStream.current) {
-      localMicStream.current.getTracks().forEach((t) => t.stop());
-      localMicStream.current = null;
-    }
-    if (localMicCtx.current) {
-      void localMicCtx.current.close().catch(() => undefined);
-      localMicCtx.current = null;
-    }
-    setAudioAnalyser(null);
-  }
-
-  function stopAndSubmitBrowserSpeech() {
-    if (hasSubmittedTurn.current) return;
-    hasSubmittedTurn.current = true;
-    const transcript = latestTranscriptRef.current.trim();
-    cleanupLocalMic();
-    if (browserRecognition.current) {
-      try {
-        browserRecognition.current.stop();
-      } catch {
-        // ignore
-      }
-      browserRecognition.current = null;
-    }
-    setIsRecognizing(false);
-    if (transcript) {
-      setActiveActionLabel(`ORBIT EXECUTING: "${transcript.slice(0, 32)}"`);
-      void send(transcript);
+  function handleCallToggle() {
+    if (connected) {
+      disconnect();
     } else {
-      setActiveActionLabel("ORBIT RESPONDING — ASSISTING USER");
-      void send("Assalam-o-Alaikum! Tell me about Awaaz Estate verified properties.");
+      handleVoiceToggle();
     }
   }
 
@@ -809,34 +632,23 @@ function App() {
     unlockAudio();
     if (connected) {
       disconnect();
-    } else if (displayVoicePhase === "speaking") {
-      // Barge-in: immediately stop speaking and listen
-      playback.current.stop();
-      if (typeof window !== "undefined" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
-      setVoicePhase("listening");
-      setActiveActionLabel("BARGE-IN TRIGGERED — LISTENING");
-      startBrowserSpeech();
-    } else if (isRecognizing) {
-      stopAndSubmitBrowserSpeech();
-    } else if (voiceReady) {
+    } else if (resolveLiveVoiceAction(voiceReady) === "connect") {
       void connect();
     } else {
-      startBrowserSpeech();
+      setVoicePhase("blocked");
+      setActiveActionLabel("LIVE VOICE IS NOT READY — CHECK PROVIDER READINESS");
     }
   }
 
   function disconnect() {
+    finishSpeech.current = null;
     capture.current?.stop();
     capture.current = null;
     playback.current.stop();
-    cleanupLocalMic();
+    httpTurnAbort.current?.abort();
+    httpTurnAbort.current = null;
     setAudioAnalyser(null);
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
-    socket?.close();
+    closeVoiceSession(socket);
     setSocket(null);
     setAudioAvailable(false);
     setVoicePhase("idle");
@@ -859,9 +671,6 @@ function App() {
     setInput("");
     playback.current.stop();
     unlockAudio();
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
     setMessages((current) => [...current, { role: "customer", text, time: stamp() }]);
     setVoicePhase("thinking");
     detectAndHighlightAction(text);
@@ -869,19 +678,26 @@ function App() {
 
     // If WebSocket is active, send via real-time socket
     if (socket && socket.readyState === WebSocket.OPEN) {
+      httpTurnAbort.current?.abort();
+      httpTurnAbort.current = null;
       socket.send(JSON.stringify({ type: "barge_in" }));
       socket.send(JSON.stringify({ type: "user_text", text, language }));
       return;
     }
 
-    // Otherwise use HTTP endpoint so chatting ALWAYS works
+    // Without an active voice socket, send this turn to the live AI endpoint.
     const start = performance.now();
+    httpTurnAbort.current?.abort();
+    const controller = new AbortController();
+    httpTurnAbort.current = controller;
     try {
       const response = await fetch(`${apiUrl}/v1/conversations/${conversationId.current}/turn`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, language }),
+        signal: controller.signal,
       });
+      if (httpTurnAbort.current !== controller) return;
       if (!response.ok) throw new Error(`Server returned ${response.status}`);
       const data = await response.json();
       setLastLatencyMs(Math.round(performance.now() - start));
@@ -895,6 +711,7 @@ function App() {
       setSubtitles(reply);
       setMessages((current) => [...current, { role: "agent", text: reply, time: stamp() }]);
       setActiveActionLabel("ACTION: RESPONSE DELIVERED");
+      setVoicePhase("idle");
 
       const ids: string[] = decision.property_ids || data.property_ids || [];
       if (ids.length > 0) {
@@ -917,22 +734,31 @@ function App() {
         );
       }
       playFuturisticTone("speaking");
-      speakText(reply);
-    } catch {
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === "AbortError") return;
+      if (httpTurnAbort.current !== controller) return;
       setVoicePhase("error");
-      setActiveActionLabel("CONNECTION ERROR: BACKEND UNREACHABLE");
+      setActiveActionLabel("LIVE AI TURN FAILED — CHECK BACKEND AND PROVIDER STATUS");
       setMessages((current) => [
         ...current,
         {
           role: "agent",
-          text: "Server connection issue. Please verify backend is running on " + apiUrl,
+          text: "I couldn't reach the live AI service. Please try again in a moment.",
           time: stamp(),
         },
       ]);
+    } finally {
+      if (httpTurnAbort.current === controller) httpTurnAbort.current = null;
     }
   }
 
   async function bookVisit() {
+    if (!selectedPropertyId || !propertyDetails[selectedPropertyId]) {
+      setAppointmentTone("error");
+      setAppointmentStatus("Import a real available property before requesting a visit.");
+      setActiveActionLabel("BOOKING BLOCKED — NO VERIFIED PROPERTY SELECTED");
+      return;
+    }
     setActiveActionLabel("ACTION: BOOKING SITE VISIT…");
     setAppointmentStatus("Scheduling site visit…");
     setAppointmentTone("pending");
@@ -944,8 +770,8 @@ function App() {
           client_name: appointmentForm.client_name,
           contact_email: appointmentForm.contact_email,
           contact_phone: appointmentForm.contact_phone || null,
-          property_id: selectedPropertyId || "PROP-001",
-          employee: propertyDetails[selectedPropertyId]?.assigned_employee || "Ayesha Khan",
+          property_id: selectedPropertyId,
+          employee: propertyDetails[selectedPropertyId]?.assigned_employee ?? "",
           idempotency_key:
             typeof crypto !== "undefined" && crypto.randomUUID
               ? crypto.randomUUID()
@@ -956,14 +782,14 @@ function App() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Booking failed");
-      setAppointmentTone("success");
-      setAppointmentStatus(`Confirmed: Reference ${data.reference}`);
-      setActiveActionLabel(`ACTION: VISIT SCHEDULED (${data.reference})`);
+      setAppointmentTone("pending");
+      setAppointmentStatus(`Visit request recorded. Calendar confirmation pending — reference ${data.reference}.`);
+      setActiveActionLabel(`ACTION: VISIT REQUEST RECORDED (${data.reference})`);
       setMessages((current) => [
         ...current,
         {
           role: "agent",
-          text: `Site visit scheduled for property ${data.property_id || selectedPropertyId}! Reference: ${data.reference}`,
+          text: `Visit request recorded for property ${data.property_id || selectedPropertyId}. Calendar confirmation is pending. Reference: ${data.reference}`,
           time: stamp(),
         },
       ]);
@@ -1011,7 +837,7 @@ function App() {
 
           <div className={`orbit-status-chip ${connected ? "live" : voiceReady ? "ready" : "offline"}`}>
             <span className="status-dot" />
-            <span>{connected ? "LIVE ORBIT" : voiceReady ? "STANDBY" : "OFFLINE"}</span>
+            <span>{connected ? "LIVE OPENAI VOICE" : voiceReady ? "LIVE READY" : "VOICE OFFLINE"}</span>
           </div>
         </div>
       </header>
@@ -1088,7 +914,7 @@ function App() {
           <div className="orbit-canvas-wrap">
             <NeuralOrb
               voicePhase={displayVoicePhase}
-              isAudioActive={(connected || isRecognizing || displayVoicePhase === "speaking") && (displayVoicePhase === "speaking" || displayVoicePhase === "listening")}
+              isAudioActive={connected && (displayVoicePhase === "speaking" || displayVoicePhase === "listening")}
               onClick={handleVoiceToggle}
               audioAnalyser={audioAnalyser}
             />
@@ -1097,7 +923,7 @@ function App() {
           {/* Subtitles & State Indicator directly around Orbit */}
           <div className="orbit-state-overlay">
             <div className={`orbit-state-pill phase-${displayVoicePhase}`}>
-              {voicePhaseLabels[displayVoicePhase]}
+              {displayVoicePhase === "error" ? activeActionLabel : voicePhaseLabels[displayVoicePhase]}
             </div>
             {subtitles && <p className="orbit-subtitles-stream">"{subtitles}"</p>}
             {displayVoicePhase === "speaking" && (
@@ -1106,16 +932,16 @@ function App() {
                 className="barge-in-btn"
                 onClick={() => {
                   playback.current.stop();
-                  if (typeof window !== "undefined" && "speechSynthesis" in window) {
-                    window.speechSynthesis.cancel();
-                  }
                   if (socket?.readyState === WebSocket.OPEN) {
                     socket.send(JSON.stringify({ type: "barge_in" }));
                   } else {
-                    startBrowserSpeech();
+                    setVoicePhase(voiceReady ? "idle" : "blocked");
+                    setActiveActionLabel("SPEECH STOPPED");
                   }
-                  setVoicePhase("listening");
-                  setActiveActionLabel("BARGE-IN TRIGGERED — LISTENING");
+                  if (socket?.readyState === WebSocket.OPEN) {
+                    setVoicePhase("listening");
+                    setActiveActionLabel("BARGE-IN TRIGGERED — LISTENING");
+                  }
                 }}
                 aria-label="Tap to interrupt agent speech"
               >
@@ -1127,7 +953,7 @@ function App() {
 
           {/* Audio Waveform Spectrum */}
           <WaveformVisualizer
-            isActive={(connected || isRecognizing || displayVoicePhase === "speaking") && (displayVoicePhase === "speaking" || displayVoicePhase === "listening")}
+            isActive={connected && (displayVoicePhase === "speaking" || displayVoicePhase === "listening")}
           />
         </div>
 
@@ -1191,7 +1017,7 @@ function App() {
               setShowMapRadar(true);
             }}
           >
-            <span className="node-tag">{lastLatencyMs ? `${lastLatencyMs}ms` : "42ms"}</span>
+            <span className="node-tag">{lastLatencyMs === null ? "—" : `${lastLatencyMs}ms`}</span>
             <div className="node-content text-right">
               <span className="node-title">Geospatial Radar</span>
               <span className="node-sub">Interactive Map HUD</span>
@@ -1255,20 +1081,27 @@ function App() {
             <span>Finance HUD</span>
           </button>
 
-          <div className={`dock-asr-pill ${connected || isRecognizing ? "live" : ""}`}>
+          <div className={`dock-asr-pill ${connected ? "live" : ""}`}>
             <span className="asr-led" />
-            <span>ASR {connected ? "0.024s" : isRecognizing ? "LIVE MIC" : "STANDBY"}</span>
+            <span>ASR {connected ? (voiceMode === "openai" ? "OPENAI LIVE" : "DEEPGRAM LIVE") : "STANDBY"}</span>
           </div>
+
+          {connected && audioAvailable && displayVoicePhase === "listening" && (
+            <button type="button" className="dock-action-pill" onClick={() => finishSpeech.current?.()} aria-label="Finish speaking and get reply">
+              <Icon>{paths.send}</Icon>
+              <span>Reply now</span>
+            </button>
+          )}
 
           <button
             type="button"
-            className={`dock-call-pill ${connected || isRecognizing ? "in-call" : ""}`}
-            onClick={handleVoiceToggle}
+            className={`dock-call-pill ${connected ? "in-call" : ""}`}
+            onClick={handleCallToggle}
             disabled={connecting}
-            aria-label={connected || isRecognizing ? "Stop Voice Talk" : "Start Live Voice Talk"}
+            aria-label={connected ? "Stop Voice Chat" : "Start Voice Chat"}
           >
-            <Icon>{connected || isRecognizing ? paths.phone : paths.mic}</Icon>
-            <span>{connecting ? "Connecting…" : connected || isRecognizing ? "Stop Talk" : "Ask - Direct"}</span>
+            <Icon>{connected ? paths.phone : paths.mic}</Icon>
+            <span>{connecting ? "Connecting…" : connected ? "Stop Voice Chat" : "Start Voice Chat"}</span>
           </button>
         </div>
 
@@ -1432,14 +1265,7 @@ function App() {
             <div className="modal-fields">
               <div className="form-row">
                 <label>Voice Provider Engine</label>
-                <select
-                  value={voiceMode}
-                  onChange={(e) => setVoiceMode(e.target.value as VoiceMode)}
-                  disabled={connected || connecting}
-                >
-                  <option value="openai">OpenAI Realtime Voice Pipeline</option>
-                  <option value="standard">Standard Multi-Provider (Deepgram + TTS)</option>
-                </select>
+                <div className="settings-value">OpenAI Realtime Voice Pipeline</div>
               </div>
 
               <div className="form-row">
@@ -1458,27 +1284,24 @@ function App() {
               </div>
 
               <div className="form-row">
-                <label>Agent Voice Persona</label>
+                <label htmlFor="voice-input-device">Microphone</label>
                 <select
-                  value={voicePersona}
-                  onChange={(e) => setVoicePersona(e.target.value as "ayesha" | "zayan")}
+                  id="voice-input-device"
+                  value={selectedInputId}
+                  onChange={(event) => changeInputDevice(event.target.value)}
                 >
-                  <option value="ayesha">Ayesha (Warm Real Estate Consultant)</option>
-                  <option value="zayan">Zayan (Corporate Market Analyst)</option>
+                  <option value="">System default microphone</option>
+                  {audioInputs.filter((device) => device.deviceId).map((device, index) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label || `Microphone ${index + 1}`}
+                    </option>
+                  ))}
                 </select>
               </div>
 
               <div className="form-row">
-                <label>Speech Pacing / Audio Speed</label>
-                <select
-                  value={speechRate.toString()}
-                  onChange={(e) => setSpeechRate(parseFloat(e.target.value))}
-                >
-                  <option value="0.9">0.9x (Relaxed & Deliberate)</option>
-                  <option value="1">1.0x (Standard Conversational)</option>
-                  <option value="1.15">1.15x (Brisk Professional)</option>
-                  <option value="1.3">1.3x (Rapid Briefing)</option>
-                </select>
+                <label>Voice Output</label>
+                <div className="settings-value">Generated by the configured OpenAI speech service</div>
               </div>
             </div>
             <div className="modal-foot">
@@ -1518,7 +1341,7 @@ function App() {
                     </option>
                   ))
                 ) : (
-                  <option value="PROP-001">PROP-001 — Emaar Coral Towers Luxury 3-Bed Waterfront Apartment, Karachi</option>
+                  <option value="" disabled>Import real property listings to schedule a visit</option>
                 )}
               </select>
             </div>

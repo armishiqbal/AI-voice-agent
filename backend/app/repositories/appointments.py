@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.core.config import settings
 from app.core.pii import ContactCipher
 from app.domain.models import Appointment, AppointmentRequest, AppointmentUpdate
 from app.repositories.database import SessionLocal
@@ -17,6 +18,7 @@ from app.repositories.records import (
     OutboxEventRecord,
     ToolAuditEventRecord,
 )
+from app.services.appointments import redact_for_retention
 
 
 class SqlAppointmentService:
@@ -24,6 +26,22 @@ class SqlAppointmentService:
         self.properties = properties
         self.session_factory = session_factory
         self.cipher = ContactCipher()
+
+    @staticmethod
+    def _employee_email(request: AppointmentRequest) -> str | None:
+        directory = {
+            name.casefold(): str(email) for name, email in settings.employee_email_directory.items()
+        }
+        if directory:
+            recipient = directory.get(request.employee.casefold())
+            if not recipient:
+                raise ValueError("Assigned employee has no configured notification address")
+            return recipient
+        # Legacy API callers may supply an address locally; voice bookings resolve
+        # from the operator-managed directory when Gmail is enabled.
+        if settings.gmail_sender:
+            raise ValueError("Configure EMPLOYEE_EMAIL_DIRECTORY before enabling booking emails")
+        return str(request.employee_email) if request.employee_email else None
 
     @staticmethod
     def _valid_slot(value: datetime) -> bool:
@@ -120,12 +138,28 @@ class SqlAppointmentService:
             property_id=record.property_id,
             employee=record.employee,
             employee_email=record.employee_email,
-            starts_at=record.starts_at,
+            starts_at=record.starts_at
+            if record.starts_at.tzinfo
+            else record.starts_at.replace(tzinfo=UTC),
             client_name=record.client_name,
             contact_email=self.cipher.decrypt(record.contact_email_ciphertext),
             contact_phone=contact_phone,
             status=record.status,
         )
+
+    def get_for_contact(self, reference: str, contact_email: str) -> Appointment:
+        """Read one appointment only after matching its consented contact identity."""
+        with self.session_factory() as session:
+            record = session.scalar(
+                select(AppointmentRecord).where(AppointmentRecord.reference == reference)
+            )
+            if (
+                record is None
+                or self.cipher.decrypt(record.contact_email_ciphertext).casefold()
+                != contact_email.casefold()
+            ):
+                raise ValueError("Appointment reference and contact email do not match")
+            return self._domain(record)
 
     @staticmethod
     def _audit(
@@ -223,7 +257,7 @@ class SqlAppointmentService:
                 reference=f"AES-{uuid4().hex[:10].upper()}",
                 property_id=request.property_id,
                 employee=request.employee,
-                employee_email=str(request.employee_email) if request.employee_email else None,
+                employee_email=self._employee_email(request),
                 starts_at=self._as_utc(request.starts_at),
                 client_name=request.client_name,
                 contact_email_ciphertext=self.cipher.encrypt(str(request.contact_email)),
@@ -246,14 +280,11 @@ class SqlAppointmentService:
                 "contact_phone_ciphertext": record.contact_phone_ciphertext,
                 "starts_at": record.starts_at.isoformat(),
                 "event_type": "appointment.booked",
+                "requirements": redact_for_retention(request.requirements),
+                "meeting_notes": redact_for_retention(request.meeting_notes),
             }
             session.add(
                 OutboxEventRecord(id=str(uuid4()), event_type="appointment.booked", payload=payload)
-            )
-            session.add(
-                OutboxEventRecord(
-                    id=str(uuid4()), event_type="appointment.whatsapp_confirmation", payload=payload
-                )
             )
             self._audit(
                 session,
@@ -286,6 +317,13 @@ class SqlAppointmentService:
                     )
                 )
                 if existing_record:
+                    if (
+                        existing_action.reference != update.reference
+                        or existing_action.action != action_name
+                        or self.cipher.decrypt(existing_record.contact_email_ciphertext).casefold()
+                        != str(update.contact_email).casefold()
+                    ):
+                        raise ValueError("Appointment reference and contact email do not match")
                     self._audit(
                         session,
                         f"appointment.{action_name}",
@@ -299,8 +337,8 @@ class SqlAppointmentService:
             )
             if (
                 not record
-                or self.cipher.decrypt(record.contact_email_ciphertext)
-                != str(update.contact_email).lower()
+                or self.cipher.decrypt(record.contact_email_ciphertext).casefold()
+                != str(update.contact_email).casefold()
             ):
                 self._audit(
                     session,
@@ -313,6 +351,12 @@ class SqlAppointmentService:
             if cancel:
                 record.status, event_type = "cancelled", "appointment.cancelled"
             else:
+                if record.status == "cancelled":
+                    raise ValueError(
+                        "Cancelled appointments cannot be rescheduled; create a new booking"
+                    )
+                if self.properties.get_available(record.property_id) is None:
+                    raise ValueError("Property is unavailable; the visit cannot be rescheduled")
                 if update.starts_at is None or not self._valid_slot(update.starts_at):
                     raise ValueError("Provide an eligible new appointment slot")
                 conflict = session.scalar(
@@ -337,6 +381,13 @@ class SqlAppointmentService:
                     "rescheduled",
                     "appointment.rescheduled",
                 )
+            previous_event = session.scalar(
+                select(OutboxEventRecord)
+                .where(OutboxEventRecord.payload["reference"].as_string() == record.reference)
+                .order_by(OutboxEventRecord.created_at.desc())
+                .limit(1)
+            )
+            previous_context = previous_event.payload if previous_event else {}
             payload = {
                 "reference": record.reference,
                 "property_id": record.property_id,
@@ -347,6 +398,8 @@ class SqlAppointmentService:
                 "contact_phone_ciphertext": record.contact_phone_ciphertext,
                 "starts_at": record.starts_at.isoformat(),
                 "event_type": event_type,
+                "requirements": previous_context.get("requirements", ""),
+                "meeting_notes": previous_context.get("meeting_notes", ""),
             }
             session.add(OutboxEventRecord(id=str(uuid4()), event_type=event_type, payload=payload))
             session.add(

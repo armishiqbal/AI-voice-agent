@@ -11,7 +11,7 @@ def test_csv_import_keeps_valid_rows_and_reports_invalid_rows() -> None:
     )
     result = parse_inventory_bytes(data, "inventory.csv", "crm-export-2026-09-22")
     assert [item.id for item in result.records] == ["P-1"]
-    assert result.records[0].source == "demo-fixture"
+    assert result.records[0].source == "unverified"
     assert result.errors[0].field == "price_pkr"
     assert result.source == "crm-export-2026-09-22"
 

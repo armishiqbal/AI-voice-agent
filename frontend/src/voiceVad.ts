@@ -5,6 +5,7 @@ export class VoiceActivityDetector {
   private noiseFloor = 0.002;
   private calibrationMs = 0;
   private speechActive = false;
+  private candidateSpeechMs = 0;
   private silenceMs = 0;
   private speechMs = 0;
 
@@ -20,22 +21,28 @@ export class VoiceActivityDetector {
 
     if (!this.speechActive) {
       if (this.calibrationMs < 300 && rms < 0.02) {
-        this.noiseFloor = Math.max(0.0001, this.noiseFloor * 0.9 + rms * 0.1);
+        this.noiseFloor = Math.max(0.0001, this.noiseFloor * 0.7 + rms * 0.3);
         this.calibrationMs += frameMs;
         if (this.calibrationMs < 300) return null;
       }
-      const startThreshold = Math.max(0.0045, this.noiseFloor * 2.2);
+      const startThreshold = Math.max(0.0045, this.noiseFloor * 1.6);
       if (rms >= startThreshold) {
-        this.speechActive = true;
-        this.silenceMs = 0;
-        this.speechMs = frameMs;
-        return "speech_started";
+        this.candidateSpeechMs += frameMs;
+        if (this.candidateSpeechMs >= 160) {
+          this.speechActive = true;
+          this.silenceMs = 0;
+          this.speechMs = this.candidateSpeechMs;
+          this.candidateSpeechMs = 0;
+          return "speech_started";
+        }
+        return null;
       }
+      this.candidateSpeechMs = 0;
       this.noiseFloor = Math.max(0.0001, this.noiseFloor * 0.9 + rms * 0.1);
       return null;
     }
 
-    const endThreshold = Math.max(0.003, this.noiseFloor * 1.6);
+    const endThreshold = Math.max(0.003, this.noiseFloor * 1.25);
     this.speechMs += frameMs;
     this.silenceMs = rms < endThreshold ? this.silenceMs + frameMs : 0;
     if (this.silenceMs >= this.endSilenceMs || this.speechMs >= this.maxTurnMs) {
@@ -51,6 +58,7 @@ export class VoiceActivityDetector {
     this.noiseFloor = 0.002;
     this.calibrationMs = 0;
     this.speechActive = false;
+    this.candidateSpeechMs = 0;
     this.silenceMs = 0;
     this.speechMs = 0;
   }

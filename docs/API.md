@@ -3,7 +3,8 @@
 ## Health and readiness
 
 - `GET /healthz` — process health.
-- `GET /readyz` — provider/config readiness. Development can report ready with fixtures;
+- `GET /readyz` — application and live-provider readiness. `mode` is `live` only when a real
+  server-side voice option is configured; otherwise the response is degraded and voice is blocked.
   production is degraded until required providers are configured.
 - `GET /v1/admin/metrics` — bounded traces, counters, latency measurements, and provider status.
 - `GET /v1/admin/evaluations/report` — local 41-case report, explicitly fixture-scoped.

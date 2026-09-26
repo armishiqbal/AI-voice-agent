@@ -6,7 +6,12 @@ from datetime import datetime
 from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
-from app.domain.models import AgentDecision, AppointmentContactContext, AppointmentRequest
+from app.domain.models import (
+    AgentDecision,
+    AppointmentContactContext,
+    AppointmentRequest,
+    AppointmentUpdate,
+)
 from app.repositories.appointments import SqlAppointmentService
 from app.repositories.properties import SqlPropertyRepository
 
@@ -30,6 +35,9 @@ class VoiceBookingFlow:
         self.property_choices: list[str] = []
         self.slots: list[datetime] = []
         self.selected_slot: datetime | None = None
+        self.management_action: str | None = None
+        self.management_reference: str | None = None
+        self.requirements = ""
 
     def handle(
         self,
@@ -38,10 +46,21 @@ class VoiceBookingFlow:
         selected_property_ids: list[str],
         contact: AppointmentContactContext | None,
         conversation_id: str,
+        requirements: str = "",
     ) -> VoiceBookingResult | None:
         if model_decision.reason == "guardrail":
             return None
         lowered = text.casefold().strip()
+        if requirements:
+            self.requirements = requirements[:1000]
+        if self.phase.startswith("manage_"):
+            return self._manage(text, contact, conversation_id)
+        if self.phase == "idle" and model_decision.kind in {"reschedule", "cancel"}:
+            self.management_action = model_decision.kind
+            self.management_reference = None
+            self.selected_slot = None
+            self.phase = "manage_reference"
+            return self._manage(text, contact, conversation_id)
         if self.phase != "idle" and lowered in {
             "cancel booking",
             "cancel visit",
@@ -87,7 +106,11 @@ class VoiceBookingFlow:
             matched_prop = None
             for prop_id in self.property_choices:
                 p = self.properties.get_available(prop_id)
-                if p and (p.area.casefold() in lowered or prop_id.casefold() in lowered or p.title.casefold() in lowered):
+                if p and (
+                    p.area.casefold() in lowered
+                    or prop_id.casefold() in lowered
+                    or p.title.casefold() in lowered
+                ):
                     matched_prop = prop_id
                     break
             if matched_prop:
@@ -146,6 +169,8 @@ class VoiceBookingFlow:
                     contact_phone=contact.contact_phone,
                     idempotency_key=key,
                     consent=contact.consent,
+                    requirements=self.requirements,
+                    meeting_notes="Property viewing requested and explicitly confirmed during voice conversation.",
                 )
                 try:
                     appointment = self.appointments.book(request)
@@ -157,14 +182,8 @@ class VoiceBookingFlow:
                         + self._slot_phrase()
                     )
                 self.phase = "idle"
-                fixture = item.source == "demo-fixture"
-                qualifier = (
-                    "sample data par test visit save ho gayi"
-                    if fixture
-                    else "visit request record ho gayi; calendar confirmation pending hai"
-                )
                 result = {
-                    "status": "test_booked" if fixture else "pending_calendar",
+                    "status": "pending_calendar",
                     "reference": appointment.reference,
                     "property_id": item.id,
                     "starts_at": appointment.starts_at.isoformat(),
@@ -172,7 +191,10 @@ class VoiceBookingFlow:
                 return VoiceBookingResult(
                     AgentDecision(
                         kind="book",
-                        spoken_text=f"Ji, {qualifier}. Reference {appointment.reference} hai.",
+                        spoken_text=(
+                            "Ji, visit request record ho gayi. Calendar confirmation pending hai. "
+                            f"Reference {appointment.reference} hai."
+                        ),
                     ),
                     result,
                 )
@@ -188,6 +210,128 @@ class VoiceBookingFlow:
             )
 
         return self._say("Visit booking state reset ho gayi. Dobara visit request kar dein.")
+
+    def _manage(
+        self, text: str, contact: AppointmentContactContext | None, conversation_id: str
+    ) -> VoiceBookingResult:
+        lowered = text.casefold().strip()
+        if lowered in {"stop", "never mind", "rehne dein", "abort"}:
+            self.phase = "idle"
+            return self._say("Theek hai, appointment mein koi tabdeeli nahi ki.")
+        reference_match = re.search(r"\bAES[ -]?([a-fA-F0-9]{10})\b", text, re.IGNORECASE)
+        if self.phase in {"manage_contact", "manage_reference"}:
+            if reference_match:
+                self.management_reference = "AES-" + reference_match.group(1).upper()
+            if contact is None:
+                self.phase = "manage_contact"
+                return self._say(
+                    "Pehle neeche consent form mein booking wali email aur naam dein. "
+                    "Phir appointment ka AES reference boliye ya type karein; email awaaz mein share na karein."
+                )
+            if self.management_reference is None:
+                self.phase = "manage_reference"
+                return self._say(
+                    "Kaunsi appointment? Confirmation wala poora AES reference boliye ya type karein."
+                )
+            try:
+                appointment = self.appointments.get_for_contact(
+                    self.management_reference, str(contact.contact_email)
+                )
+            except ValueError:
+                self.management_reference = None
+                self.phase = "manage_reference"
+                return self._say(
+                    "Reference aur consent form ki email match nahi hue. Booking wali email aur reference check karein; koi tabdeeli nahi hui."
+                )
+            if appointment.status == "cancelled":
+                self.phase = "idle"
+                return self._say(
+                    "Yeh appointment pehle hi cancel hai. Naye visit ke liye nayi booking request karein."
+                )
+            self.property_id = appointment.property_id
+            if self.management_action == "cancel":
+                self.phase = "manage_confirm"
+                return self._say(
+                    f"Confirm karein: reference {appointment.reference}, {self._spoken_time(appointment.starts_at)} ka visit cancel karoon? Haan ya nahin kahiye."
+                )
+            self.slots = self.appointments.available_slots(appointment.property_id)
+            if not self.slots:
+                self.phase = "idle"
+                return self._say(
+                    "Is property ke liye koi verified naya slot nahi mila. Purani appointment unchanged hai."
+                )
+            self.phase = "manage_slots"
+            return self._say(
+                "Naya time select karein: "
+                + self._slot_phrase()
+                + ". Purani appointment abhi unchanged hai."
+            )
+        if self.phase == "manage_slots":
+            choice = self._ordinal(lowered, len(self.slots))
+            if choice is None:
+                return self._say("Naye time ka option choose karein: " + self._slot_phrase())
+            self.selected_slot = self.slots[choice]
+            self.phase = "manage_confirm"
+            return self._say(
+                f"Reference {self.management_reference} ko {self._spoken_time(self.selected_slot)} par reschedule karoon? Haan ya nahin kahiye."
+            )
+        if self.phase == "manage_confirm":
+            confirmation = (
+                re.sub(r"\bcancel\b", "", lowered).strip()
+                if self.management_action == "cancel"
+                else lowered
+            )
+            if self._is_rejection(confirmation):
+                self.phase = "idle"
+                return self._say("Theek hai, appointment mein koi tabdeeli nahi ki.")
+            if not self._is_confirmation(confirmation):
+                return self._say(
+                    "Tabdeeli se pehle clear confirmation chahiye. Haan ya nahin kahiye."
+                )
+            if contact is None or self.management_reference is None:
+                self.phase = "manage_contact"
+                return self._say(
+                    "Booking wali contact email aur consent form dobara complete karein; koi tabdeeli nahi hui."
+                )
+            reference = self.management_reference
+            action = self.management_action
+            key = uuid5(
+                NAMESPACE_URL,
+                f"awaaz-voice-update:{conversation_id}:{action}:{reference}:{self.selected_slot}",
+            )
+            try:
+                result = self.appointments.update(
+                    AppointmentUpdate(
+                        reference=reference,
+                        contact_email=contact.contact_email,
+                        starts_at=self.selected_slot,
+                        idempotency_key=key,
+                    ),
+                    cancel=action == "cancel",
+                )
+            except ValueError:
+                self.phase = "manage_reference"
+                self.management_reference = None
+                return self._say(
+                    "Identity ya slot dobara verify nahi ho saka. Tabdeeli confirm nahi hui; reference aur current availability dobara check karein."
+                )
+            self.phase = "idle"
+            verb = "cancellation" if action == "cancel" else "reschedule"
+            return VoiceBookingResult(
+                AgentDecision(
+                    kind=action,
+                    spoken_text=f"Ji, {verb} request reference {reference} ke liye record ho gayi. Calendar aur employee email update pending hai.",
+                ),
+                {
+                    "reference": reference,
+                    "property_id": result.property_id,
+                    "starts_at": result.starts_at.isoformat(),
+                    "status": "pending_calendar",
+                    "action": verb,
+                },
+            )
+        self.phase = "idle"
+        return self._say("Appointment management reset ho gayi; koi tabdeeli nahi ki.")
 
     def _continue_to_slots(self, contact: AppointmentContactContext | None) -> VoiceBookingResult:
         if contact is None:
@@ -256,6 +400,8 @@ class VoiceBookingFlow:
 
     @staticmethod
     def _is_confirmation(text: str) -> bool:
+        if VoiceBookingFlow._is_rejection(text):
+            return False
         if text in {
             "yes",
             "yes please",
@@ -297,7 +443,7 @@ class VoiceBookingFlow:
             return True
         return bool(
             re.search(
-                r"\b(no|nahin|nahi|na|cancel|mat karein|mat karo|rehne dein|rehney do)\b",
+                r"\b(no|not|don.t|nahin|nahi|na|cancel|mat karein|mat karo|rehne dein|rehney do)\b",
                 text,
                 re.IGNORECASE,
             )

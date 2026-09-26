@@ -26,6 +26,7 @@ export type ServerEvent = {
   status?: string;
   reference?: string;
   starts_at?: string;
+  action?: "cancellation" | "reschedule";
   latency_ms?: number;
 };
 
@@ -119,7 +120,8 @@ export function parseServerEvent(data: unknown): ServerEvent | null {
         ? value as ServerEvent
         : null;
     case "appointment_result":
-      return (value.status === "test_booked" || value.status === "pending_calendar")
+      return value.status === "pending_calendar"
+        && (value.action === undefined || value.action === "cancellation" || value.action === "reschedule")
         && typeof value.reference === "string"
         && value.reference.length <= 32
         && typeof value.property_id === "string"

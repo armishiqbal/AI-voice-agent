@@ -22,7 +22,10 @@ def test_trace_store_uses_upper_sample_for_small_p95() -> None:
     traces = TraceStore()
     traces.observe("latency", 10)
     traces.observe("latency", 100)
-    assert traces.snapshot()["measurements"]["latency"]["p95"] == 100
+    metrics = traces.snapshot()["measurements"]["latency"]
+    assert metrics["p95"] == 100
+    assert metrics["p99"] == 100
+    assert metrics["mean"] == 55
 
 
 def test_trace_store_snapshot_is_safe_when_optional_metric_is_missing() -> None:

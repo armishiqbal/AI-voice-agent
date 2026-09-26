@@ -20,6 +20,9 @@ from app.services.retrieval import GroundedRetriever, rank_properties
 
 INJECTION_PATTERNS = (
     "ignore previous",
+    "ignore instructions",
+    "ignore all instructions",
+    "disregard instructions",
     "reveal your prompt",
     "system prompt",
     "internal company data",
@@ -78,6 +81,7 @@ class EstateAgent:
         builder.add_node("guardrails", self._guardrails)
         builder.add_node("intent_detection", self._detect_intent)
         builder.add_node("grounded_resolution", self._resolve)
+        builder.add_node("grounding_validation", self._validate_grounding)
         for route_name in (
             "greeting",
             "answer",
@@ -97,8 +101,9 @@ class EstateAgent:
             {"handoff": "handoff", "intent_detection": "intent_detection"},
         )
         builder.add_edge("intent_detection", "grounded_resolution")
+        builder.add_edge("grounded_resolution", "grounding_validation")
         builder.add_conditional_edges(
-            "grounded_resolution",
+            "grounding_validation",
             lambda state: state["route"],
             {
                 route_name: route_name
@@ -162,7 +167,7 @@ class EstateAgent:
                 spoken_text="Allah hafiz. Jab bhi verified property ya visit ki zaroorat ho, Awaaz Estate se rabta kijiye.",
             )
             route = "goodbye"
-        elif self._is_greeting(lowered):
+        elif self._is_greeting(lowered) and Intent(graph_state["intent"]) == Intent.UNKNOWN and len(lowered.split()) <= 5:
             decision = AgentDecision(
                 kind="ask_clarification",
                 spoken_text="Assalam-o-Alaikum. Main Awaaz Estate se hoon. Aap buy, rent, commercial, ya investment ke liye dekh rahe hain?",
@@ -181,10 +186,34 @@ class EstateAgent:
         )
         return {"decision": decision, "route": route}
 
+    def _validate_grounding(self, graph_state: GraphState) -> dict[str, object]:
+        """Recheck authoritative inventory immediately before exposing a decision.
+
+        This is an executable graph boundary, separate from model resolution.
+        Appointment commands still require service-side consent and slot checks.
+        """
+        started = perf_counter()
+        decision = graph_state["decision"]
+        available = all(self.properties.get_available(item) is not None for item in decision.property_ids)
+        if not available:
+            decision = AgentDecision(
+                kind="ask_clarification", reason="inventory_changed",
+                spoken_text="Yeh option ab available nahi hai. Kya main fresh options check karoon?",
+            )
+            state = self.states.get(graph_state["conversation_id"])
+            if state is not None:
+                state.selected_property_ids = []
+                if state.history and state.history[-1].startswith("Agent: "):
+                    state.history[-1] = f"Agent: {decision.spoken_text}"
+                if self.state_store is not None:
+                    self.state_store.save(graph_state["conversation_id"], state)
+        self.traces.record(graph_state["conversation_id"], "grounding_validation", started, "ok" if available else "inventory_changed")
+        return {"decision": decision, "route": graph_state["route"] if available else decision.kind}
+
     def _route_node(self, graph_state: GraphState) -> dict[str, object]:
         """Explicit action nodes keep consequential routes visible in LangGraph traces."""
         route = graph_state.get("route")
-        if route in {"greeting", "goodbye"}:
+        if route:
             self.traces.record(graph_state["conversation_id"], str(route), perf_counter())
         return {"decision": graph_state["decision"]}
 
@@ -197,8 +226,10 @@ class EstateAgent:
             return Intent.RESCHEDULE
         if any(word in value for word in ("book", "visit", "appointment", "booking", "dekhna", "dekhne jana", "visit karna", "ayesha ke saath")):
             return Intent.BOOK
-        if any(word in value for word in ("sell", "bech", "bechna", "listing", "list karni")):
+        if any(word in value for word in ("sell", "bech", "bechna", "listing", "list karni", "list my property")):
             return Intent.SELL
+        if any(word in value for word in ("investment", "invest ", "rental yield", "passive income")):
+            return Intent.INVEST
         if any(word in value for word in ("rent", "kiraya", "kiraye", "kiraaye", "rental", "rent pe", "rent par", "rent ka", "monthly rent")):
             return Intent.RENT
         if any(word in value for word in ("commercial", "office", "shop", "dukan", "dukaan", "plaza", "warehouse", "godam")):
@@ -311,14 +342,18 @@ class EstateAgent:
         )
 
     def respond(self, conversation_id: str, text: str, language: str = "en") -> AgentDecision:
-        return self.graph.invoke(
+        result = self.graph.invoke(
             {"conversation_id": conversation_id, "text": text, "language": language}
-        )["decision"]
+        )
+        decision = result["decision"]
+        # Greeting, goodbye and guardrail routes also belong to durable dialogue.
+        if result.get("blocked") or result.get("route") in {"greeting", "goodbye"}:
+            state = self._load_state(conversation_id)
+            state.history.append(f"Caller: {redact_for_retention(text)}")
+            self._finish(conversation_id, state, decision)
+        return decision
 
-    def _decide(
-        self, conversation_id: str, text: str, detected_intent: Intent, language: str = "en"
-    ) -> AgentDecision:
-        lowered = text.lower()
+    def _load_state(self, conversation_id: str) -> ConversationState:
         state = self.states.get(conversation_id)
         if state is None and self.state_store is not None:
             stored = self.state_store.load(conversation_id)
@@ -327,9 +362,33 @@ class EstateAgent:
                 state = ConversationState(**stored)
         state = state or ConversationState()
         self.states[conversation_id] = state
-        state.history.append(redact_for_retention(text))
+        return state
+
+    def _decide(
+        self, conversation_id: str, text: str, detected_intent: Intent, language: str = "en"
+    ) -> AgentDecision:
+        lowered = text.lower()
+        state = self._load_state(conversation_id)
+        state.history.append(f"Caller: {redact_for_retention(text)}")
         state.history = state.history[-20:]
+        previous_dialogue = state.history[:-1]
         state.detected_language = language
+        if not text.strip():
+            return self._finish(conversation_id, state, AgentDecision(
+                kind="ask_clarification", reason="silent_caller",
+                spoken_text="Ji, main yahin hoon. Aap ki awaaz clear nahi aayi; dobara bata dein?",
+            ))
+        if any(marker in lowered for marker in ("angry", "furious", "terrible service", "ghussa", "bakwas", "complaint")):
+            state.escalation_reason = "customer_complaint"
+            return self._finish(conversation_id, state, AgentDecision(
+                kind="handoff", reason="customer_complaint",
+                spoken_text="Aap ki pareshani samajh sakta hoon. Kya main human consultant se baat karne ki request record karoon?",
+            ))
+        if any(marker in lowered for marker in ("write code", "write a poem", "weather", "cricket score", "cooking recipe", "politics")):
+            return self._finish(conversation_id, state, AgentDecision(
+                kind="ask_clarification", reason="off_topic",
+                spoken_text="Main property inquiries aur visits mein help karta hoon. Aap ko kis city mein property chahiye?",
+            ))
         advice_markers = (
             " vs ",
             " versus ",
@@ -438,6 +497,9 @@ class EstateAgent:
                 "not sure",
                 "location concern",
                 "builder concern",
+                "maintenance",
+                "investment concern",
+                "trust",
             )
         ):
             return self._finish(
@@ -472,47 +534,35 @@ class EstateAgent:
             )
 
         if is_advice_query:
-            if self.decision_provider is not None:
-                prompt = general_qa_prompt(history=state.history)
-                try:
-                    candidate = self.decision_provider.decide(prompt, text)
-                    if candidate.kind in ("answer", "ask_clarification", "recommend"):
-                        return self._finish(conversation_id, state, candidate)
-                except LLMDecisionError:
-                    pass
-
-            if any(k in lowered for k in ("yield", "yields", "roi", "compare", "comparison")):
-                inv_props = [
-                    p.id for p in self.properties.list(PropertyQuery(purpose="investment")) if p.available
-                ][:3]
+            if any(k in lowered for k in ("yield", "yields", "roi", "rental return")):
                 return self._finish(
                     conversation_id,
                     state,
                     AgentDecision(
                         kind="answer",
                         spoken_text=(
-                            "Karachi Clifton aur DHA mein rental yield 5.5% se 6.5% rehti hai kyunke commercial demand ziada hai. "
-                            "Lahore DHA Phase 5 aur Gulberg mein rental yields 4.5% se 5.5% hain jabke capital growth tez hai. "
-                            "Islamabad prime corporate office spaces par 6-7% expected hai. Humare paas verified investment listings available hain."
+                            "I can compare rental yields once I have current, verified listing and rental data. "
+                            "I don't have a live market feed configured right now, so I won't estimate yields or claim listings are verified."
                         ),
-                        property_ids=inv_props,
                     ),
                 )
             if any(k in lowered for k in ("briefing", "overview", "market", "today")):
-                top_props = [p.id for p in self.properties.list() if p.available][:3]
                 return self._finish(
                     conversation_id,
                     state,
                     AgentDecision(
                         kind="answer",
                         spoken_text=(
-                            "Awaaz Estate Daily Market Briefing: Karachi Clifton aur DHA mein luxury apartments ki strong demand hai. "
-                            "Lahore DHA Phase 5 aur Gulberg mein residential units actively trade ho rahi hain, "
-                            "jabke Islamabad corporate offices par steady rental yield hai. Verified listings direct visit booking ke liye available hain."
+                            "I don't have a live real-estate market feed configured, so I can't give a verified briefing for today. "
+                            "I can answer general questions or search verified listings after they are imported."
                         ),
-                        property_ids=top_props,
                     ),
                 )
+            if self.decision_provider is not None:
+                prompt = general_qa_prompt(history=previous_dialogue)
+                candidate = self._provider_decision(prompt, text)
+                if candidate is not None and candidate.kind in ("answer", "ask_clarification") and not candidate.property_ids and not candidate.source_ids:
+                    return self._finish(conversation_id, state, candidate)
         if state.intent in (Intent.BUY, Intent.RENT, Intent.COMMERCIAL, Intent.INVEST):
             purpose = {
                 Intent.BUY: "sale",
@@ -631,16 +681,13 @@ class EstateAgent:
             return self._finish(
                 conversation_id,
                 state,
-                self._model_recommendation(text, fallback, chosen, rag_context, state.history),
+                self._model_recommendation(text, fallback, chosen, rag_context, previous_dialogue),
             )
         if self.decision_provider is not None and len(text.strip()) > 3:
-            prompt = general_qa_prompt(history=state.history)
-            try:
-                candidate = self.decision_provider.decide(prompt, text)
-                if candidate.kind in ("answer", "ask_clarification", "recommend"):
-                    return self._finish(conversation_id, state, candidate)
-            except LLMDecisionError:
-                pass
+            prompt = general_qa_prompt(history=previous_dialogue)
+            candidate = self._provider_decision(prompt, text)
+            if candidate is not None and candidate.kind in ("answer", "ask_clarification") and not candidate.property_ids and not candidate.source_ids:
+                return self._finish(conversation_id, state, candidate)
         return self._finish(
             conversation_id,
             state,
@@ -657,11 +704,17 @@ class EstateAgent:
             budget_pkr=state.budget,
             intent=state.intent.value,
             booked_visit=state.appointment_status is not None,
-            history=state.history,
+            history=[
+                turn.removeprefix("Caller: ")
+                for turn in state.history
+                if not turn.startswith("Agent: ")
+            ],
         )
         state.lead_profile["temperature"] = lead_eval["temperature"]
         state.lead_profile["score"] = str(lead_eval["score"])
         state.lead_profile["recommended_action"] = lead_eval["recommended_action"]
+        state.history.append(f"Agent: {redact_for_retention(decision.spoken_text)}")
+        state.history = state.history[-20:]
         if self.state_store is not None:
             self.state_store.save(conversation_id, state)
         return decision
@@ -685,10 +738,8 @@ class EstateAgent:
                     return prop_id
             if len(state.selected_property_ids) == 1:
                 return state.selected_property_ids[0]
-        for p in self.properties.list():
-            if p.area.lower() in lowered:
-                return p.id
-        return None
+        area_matches = [p.id for p in self.properties.list() if p.available and p.area.lower() in lowered]
+        return area_matches[0] if len(area_matches) == 1 else None
 
     def _property_detail_answer(self, state: ConversationState, text: str) -> AgentDecision | None:
         """Answer only deterministic facts for an explicitly selected property."""
@@ -727,9 +778,11 @@ class EstateAgent:
         if not selected:
             if not is_detail_query or not state.selected_property_ids:
                 return None
+            if len(state.selected_property_ids) > 1:
+                return AgentDecision(kind="ask_clarification", spoken_text="Kis option ki details chahiye: pehla, doosra, ya property reference bata dein?")
             selected = state.selected_property_ids[0]
         elif not is_detail_query and not re.search(
-            r"\b(demo-\d+|pehla|doosra|teesra|first|second|third)\b", lowered
+            r"\b(pehla|doosra|teesra|first|second|third)\b", lowered
         ):
             return None
 
@@ -760,7 +813,16 @@ class EstateAgent:
                 f"Amenities: {', '.join(property_item.amenities)}.{nearby}"
             ),
         )
-        return self._model_answer(text, fallback, property_item, rag_context, state.history)
+        return self._model_answer(text, fallback, property_item, rag_context, state.history[:-1])
+
+    def _provider_decision(self, prompt: str, text: str) -> AgentDecision | None:
+        if self.decision_provider is None:
+            return None
+        try:
+            return self.decision_provider.decide(prompt, text)
+        except LLMDecisionError:
+            self.traces.increment("llm:failures")
+            return None
 
     def _model_answer(
         self,
@@ -777,20 +839,19 @@ class EstateAgent:
         prompt = answer_prompt(
             allowed_property_id,
             fallback.source_ids,
-            [getattr(item, "text", "") for item in rag_context],
+            [self.retriever.for_properties([property_item])[0].text, *[getattr(item, "text", "") for item in rag_context]],
             history=history,
         )
-        try:
-            candidate = self.decision_provider.decide(prompt, text)
-        except LLMDecisionError:
-            return fallback
-        if candidate.kind != "answer":
+        candidate = self._provider_decision(prompt, text)
+        if candidate is None or candidate.kind != "answer":
             return fallback
         if candidate.property_ids and any(
             item != allowed_property_id for item in candidate.property_ids
         ):
             return fallback
-        source_ids = [item for item in candidate.source_ids if item in fallback.source_ids]
+        if not candidate.source_ids or any(item not in fallback.source_ids for item in candidate.source_ids):
+            return fallback
+        source_ids = candidate.source_ids
         return candidate.model_copy(
             update={
                 "property_ids": [allowed_property_id],
@@ -812,19 +873,20 @@ class EstateAgent:
         prompt = recommendation_prompt(
             sorted(allowed_ids),
             fallback.source_ids,
-            [getattr(item, "text", "") for item in (rag_context or [])],
+            [*[item.text for item in self.retriever.for_properties(properties)], *[getattr(item, "text", "") for item in (rag_context or [])]],
             history=history,
         )
-        try:
-            candidate = self.decision_provider.decide(prompt, text)
-        except LLMDecisionError:
+        candidate = self._provider_decision(prompt, text)
+        if candidate is None or candidate.kind != "recommend":
             return fallback
-        if candidate.kind != "recommend":
+        if any(item not in allowed_ids for item in candidate.property_ids):
             return fallback
-        property_ids = [item for item in candidate.property_ids if item in allowed_ids]
+        property_ids = candidate.property_ids
         if not property_ids:
             return fallback
-        source_ids = [item for item in candidate.source_ids if item in fallback.source_ids]
+        if not candidate.source_ids or any(item not in fallback.source_ids for item in candidate.source_ids):
+            return fallback
+        source_ids = candidate.source_ids
         return candidate.model_copy(
             update={
                 "property_ids": property_ids[: len(properties)],

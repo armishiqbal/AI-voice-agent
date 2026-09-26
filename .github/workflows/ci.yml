@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
-      - run: pip install -e 'backend[dev]'
+      - run: pip install -e 'backend[dev,local-rag]'
       - run: python -m ruff check backend/app backend/tests scripts
       - name: Require PostgreSQL for backend integration tests
         run: >-
@@ -39,6 +39,7 @@ jobs:
           f'Expected PostgreSQL for integration tests, got {engine.dialect.name}'"
       - run: python -m pytest backend/tests
       - run: python scripts/evaluation/evaluate_appointments.py
+      - run: python scripts/evaluation/evaluate_conversations.py
       - run: cd backend && DATABASE_URL=sqlite:///./ci-migrations.db alembic upgrade head
       - run: psql "postgresql://postgres:postgres@localhost:5432/postgres" -c "CREATE DATABASE awaaz_migrations"
       - run: cd backend && DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/awaaz_migrations alembic upgrade head

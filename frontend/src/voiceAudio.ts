@@ -1,5 +1,6 @@
 export type AudioChunkHandler = (chunk: Uint8Array) => void;
 import { VoiceActivityDetector } from "./voiceVad";
+import captureWorkletUrl from "./pcmCaptureWorklet.js?url";
 
 function resampleTo16k(input: Float32Array, inputRate: number): Int16Array {
   if (inputRate === 16_000) {
@@ -30,8 +31,9 @@ export class BrowserAudioCapture {
   private context: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
-  private processor: ScriptProcessorNode | null = null;
+  private processor: AudioWorkletNode | null = null;
   private sink: GainNode | null = null;
+  private firstFrameTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private readonly voiceActivity = new VoiceActivityDetector();
   private analyser: AnalyserNode | null = null;
@@ -43,31 +45,56 @@ export class BrowserAudioCapture {
   async start(
     onChunk: AudioChunkHandler,
     onReady: () => void,
-    turnHandlers?: { onSpeechStart: () => void; onSpeechEnd: () => void },
+    turnHandlers?: { onSpeechStart: () => void; onSpeechEnd: () => void; onLevel?: (rms: number, frameMs: number) => void; onCaptureStalled?: () => void },
+    deviceId?: string,
   ): Promise<void> {
     this.stopped = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+        },
       });
       if (this.stopped) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
       this.stream = stream;
-      this.context = new AudioContext();
-      await this.context.resume();
+      const context = new AudioContext();
+      this.context = context;
+      await context.resume();
       if (this.stopped) return;
-      onReady();
-      this.source = this.context.createMediaStreamSource(this.stream);
-      this.analyser = this.context.createAnalyser();
+      if (!context.audioWorklet) throw new Error("This browser does not support AudioWorklet");
+      await context.audioWorklet.addModule(captureWorkletUrl);
+      if (this.stopped) return;
+      this.source = context.createMediaStreamSource(stream);
+      this.analyser = context.createAnalyser();
       this.analyser.fftSize = 128;
       this.source.connect(this.analyser);
-      this.processor = this.context.createScriptProcessor(4096, 1, 1);
-      this.sink = this.context.createGain();
+      this.processor = new AudioWorkletNode(context, "pcm-capture-processor", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      });
+      this.sink = context.createGain();
       this.sink.gain.value = 0;
-      this.processor.onaudioprocess = (event) => {
-        const pcm = resampleTo16k(event.inputBuffer.getChannelData(0), this.context?.sampleRate ?? 16_000);
+      const captureStalled = () => {
+        if (this.stopped) return;
+        turnHandlers?.onCaptureStalled?.();
+        this.stop();
+      };
+      this.processor.onprocessorerror = captureStalled;
+      this.processor.port.onmessage = (event: MessageEvent<Float32Array>) => {
+        if (this.stopped || !(event.data instanceof Float32Array)) return;
+        if (this.firstFrameTimer !== null) {
+          clearTimeout(this.firstFrameTimer);
+          this.firstFrameTimer = null;
+        }
+        const pcm = resampleTo16k(event.data, context.sampleRate);
         if (turnHandlers) {
           let energy = 0;
           for (let index = 0; index < pcm.length; index += 1) {
@@ -76,16 +103,21 @@ export class BrowserAudioCapture {
           }
           const rms = Math.sqrt(energy / Math.max(1, pcm.length));
           const frameMs = pcm.length * 1000 / 16_000;
+          turnHandlers.onLevel?.(rms, frameMs);
           const transition = this.voiceActivity.process(rms, frameMs);
           if (transition === "speech_started") turnHandlers.onSpeechStart();
           if (transition === "speech_ended") turnHandlers.onSpeechEnd();
         }
         onChunk(new Uint8Array(pcm.buffer));
       };
-      this.source.connect(this.processor);
       this.processor.connect(this.sink);
-      this.sink.connect(this.context.destination);
+      this.sink.connect(context.destination);
+      onReady();
+      if (this.stopped) return;
+      this.firstFrameTimer = setTimeout(captureStalled, 3_000);
+      this.source.connect(this.processor);
     } catch (error) {
+      if (this.stopped) return;
       this.stop();
       throw error;
     }
@@ -93,7 +125,11 @@ export class BrowserAudioCapture {
 
   stop(): void {
     this.stopped = true;
+    if (this.firstFrameTimer !== null) clearTimeout(this.firstFrameTimer);
+    this.firstFrameTimer = null;
     this.voiceActivity.reset();
+    this.processor?.port.postMessage({ type: "stop" });
+    if (this.processor) this.processor.port.onmessage = null;
     this.processor?.disconnect();
     this.analyser?.disconnect();
     this.source?.disconnect();

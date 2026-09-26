@@ -1,16 +1,60 @@
+name: awaaz-estate
+x-runtime: &runtime
+  image: awaaz-estate:local
+  build: .
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+psycopg://awaaz:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/awaaz
+    API_HOST: 0.0.0.0
+  volumes:
+    - ./secrets:/app/secrets:ro
+    - voice-artifacts:/app/artifacts
 services:
-  api:
-    build: .
-    ports: ["8000:8000"]
-    env_file: .env
-    depends_on: [postgres]
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: awaaz
       POSTGRES_USER: awaaz
-      POSTGRES_PASSWORD: awaaz
-    ports: ["5432:5432"]
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U awaaz -d awaaz]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  migrate:
+    <<: *runtime
+    working_dir: /app/backend
+    command: [alembic, upgrade, head]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    <<: *runtime
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  worker:
+    <<: *runtime
+    command: [python, worker.py]
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
   n8n:
-    image: n8nio/n8n:latest
-    ports: ["5678:5678"]
+    profiles: [automation]
+    image: ${N8N_IMAGE:-docker.n8n.io/n8nio/n8n:latest}
+    ports: ["127.0.0.1:5678:5678"]
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
+      GENERIC_TIMEZONE: Asia/Karachi
+      TZ: Asia/Karachi
+    volumes:
+      - n8n-data:/home/node/.n8n
+volumes:
+  postgres-data:
+  voice-artifacts:
+  n8n-data:

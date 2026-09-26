@@ -1,53 +1,19 @@
-# Release checklist and implementation matrix
+# Release and submission checklist
 
-This is the end-to-end handover checklist for Awaaz Estate. It distinguishes code that is
-implemented and verified locally from evidence that requires provider credentials, a managed
-database, or an approved live-call policy. A local pass is not a production claim.
+The full [capstone requirement matrix](CAPSTONE_REQUIREMENTS.md) supersedes previous scope notes
+that excluded Docker/n8n. Deployment is deferred; packaging and workflow preparation are included.
+Check a gate only after retaining its actual output. A script existing or readiness flag being
+true is not evidence of a successful external operation.
 
-## Scope decision
+## Local checks
 
-- Browser voice console is the v1 acceptance surface.
-- PostgreSQL is the production database; SQLite is only the zero-setup development fallback.
-- `python worker.py` is the transactional outbox worker for Calendar, Gmail, and the internal
-  CRM-ready lead log.
-- Docker and n8n are intentionally not required. Existing Docker files are historical scaffolding,
-  not part of the run path or release gate.
-- Telephony has a fail-closed Twilio media-stream adapter. A carrier, phone number,
-  recording-consent policy, PCM16 TTS configuration, and live-call test are required before enabling
-  phone calls.
-
-## Requirement matrix
-
-| Area | Implementation | Evidence/status | Remaining prerequisite |
-|---|---|---|---|
-| API runtime | FastAPI, `run.py`, health/readiness/OpenAPI | Passed locally | PostgreSQL process for production |
-| Backend checks | Ruff, unit/integration suite | 93 passed; 2 PostgreSQL-only concurrency tests skipped locally | PostgreSQL CI run |
-| Web console | React/Vite microphone, text fallback, playback, barge-in | Frontend build passed | Browser/device human voice test |
-| STT | Deepgram streaming adapter, confidence gate, low-confidence event | Contract/tests passed | `DEEPGRAM_API_KEY`, live latency run |
-| Reasoning | LangGraph routes and typed `AgentDecision` | 41/41 scripted fixture conversations passed | `OPENAI_API_KEY` and live model run |
-| Grounding | SQL facts, filtered Pinecone context, source IDs, deterministic fallback, persisted tool results | Grounded local gate passed | Pinecone corpus and live RAG evaluation |
-| Inventory | 36+ labeled fixtures, CSV/JSON validation, source/version ledger, amenities and investment goals | Ingestion tests passed | Real company export and import review |
-| Multilingual TTS | Configurable language routes and isolated OSS worker contracts | Contract tests passed; model loading/voice quality not verified | Approved language/script scope, target hardware, model/license decision, native-speaker review |
-| TTS benchmark | Balanced 20-phrase Fish-vs-ElevenLabs protocol | Harness implemented; no winner assumed | API keys and recorded human rubric |
-| Appointments | PKT hours, Mon-Sat, 30-minute slots, employee ownership, conflict index, encrypted optional phone | 9/9 isolated cases passed | Production PostgreSQL concurrency test |
-| Reschedule/cancel | Reference + matching consented email + idempotency | Deterministic tests passed | Operator acceptance test |
-| Contact privacy | Fernet encryption, consent validation, redacted transcripts, no raw audio, 30-day expiry | Privacy tests passed | Key rotation/retention policy approval |
-| Delivery | Transactional outbox, leases, retries, internal CRM sink, Calendar/Gmail handlers, lead follow-up timestamp | Worker tests passed | Google OAuth test account |
-| Admin security | `X-Admin-Api-Key` protects metrics, reports, inventory imports, and knowledge ingestion outside development; consented lead form stays public | API boundary implemented | Strong secret in deployment secret store |
-| Browser voice access | Short-lived one-use ticket, Origin/client binding, database-backed issue quota, active-call leases, trusted-proxy allowlist | Local replay/binding/throttle/capacity/disconnect tests and Uvicorn CIDR middleware test pass | Verify deployed proxy chain and PostgreSQL lease concurrency before public exposure |
-| Observability | Counters, node transitions, provider failures, STT confidence, P95 latency | Local report implemented | Representative live traffic |
-| Security | Prompt-injection guard, tool validation, no LLM direct execution | Injection/evaluation cases passed | Security review and threat-model sign-off |
-| Telephony | Optional signed Twilio webhook/outbound call adapter, μ-law media bridge, no fake call state | Codec/signature tests passed; live call not claimed | Carrier, phone number, consent, PCM16 TTS, live-call test |
-| Deployment | CI, Alembic head `0021_voice_session_leases`, process-based handover docs | Clean SQLite upgrade/downgrade/re-upgrade passed; PostgreSQL CI/live evidence not yet verified | Managed PostgreSQL, secrets, deployment operator |
-
-## Release gates
-
-Run these checks from the repository root:
+Run from the repository root in the configured development environment:
 
 ```bash
 python -m pytest backend/tests
 python -m ruff check backend/app backend/tests scripts
 python -m compileall -q backend
+npm test --prefix frontend
 npm run build --prefix frontend
 python scripts/evaluation/evaluate.py
 python scripts/evaluation/evaluate_rag.py
@@ -56,26 +22,52 @@ python scripts/evaluation/evaluate_appointments.py
 python scripts/evaluation/release_report.py
 ```
 
-For a clean migration check (without touching the development database):
+Also execute the multi-turn conversation evaluator included with the submission. Retain case
+IDs, expected/actual outcomes, denominators and failures. The original 41 single-turn prompts do
+not alone meet the requirement for forty test conversations. SQL retrieval results must retain
+their fixture label; source-ID correctness is narrower than full factual claim correctness.
 
-```bash
-cd backend
-DATABASE_URL=sqlite:///./awaaz-migration.db alembic upgrade head
-DATABASE_URL=sqlite:///./awaaz-migration.db alembic current
-```
+| Gate | Required evidence |
+|---|---|
+| Backend/frontend | Current tests, lint and build output; explain all skips |
+| Packaging | Wheel contains nested `app` packages; Docker image builds without embedding secrets |
+| Migrations | Upgrade on a disposable SQLite DB and PostgreSQL DB; never downgrade a real client DB for testing |
+| Concurrency | PostgreSQL appointment conflict, ticket issuance and active-call lease checks |
+| Agent/RAG | Multi-turn suite, twenty retrieval questions, memory, injection cases, chunk comparison |
+| Workflow | Receipt persistence/retry tests, validated employee mapping, inactive n8n export structure |
+| Voice | AudioWorklet capture, stop/reconnect/error handling and continuous turn contracts |
+| Documentation | Matrix, diagrams, user/admin/API guides, executive report, actual slide deck and timed script |
 
-The release report must show local passes for grounding, retrieval, memory, appointment
-correctness, and prompt-injection safety. It must show live voice latency and Google delivery as
-`blocked by prerequisite` until the relevant credentials and test runs exist. Telephony must also
-remain `blocked by prerequisite` until Twilio signature, media, consent, and live-call checks pass.
+Do not run migration checks against the default database by accident. Supply a unique disposable
+`DATABASE_URL` and run `alembic upgrade head` from `backend/`. Record the actual migration head.
+CI provisions PostgreSQL; a checked-in workflow is not proof that the remote CI job ran.
 
-## Ordered handover
+## Provider and company acceptance (still required)
 
-1. Copy `.env.example` to `.env`; keep secrets out of source control.
-2. Install the backend and frontend dependencies.
-3. Set PostgreSQL `DATABASE_URL` and run `alembic upgrade head`.
-4. Start `python run.py`, `python worker.py`, and the Vite frontend in separate terminals.
-5. Verify `/healthz`, `/readyz`, the browser text path, and one appointment lifecycle.
-6. Configure provider adapters one at a time, then rerun the release report after each live gate.
-7. Perform human Urdu/English code-switching, barge-in, pronunciation, and consent review.
-8. Only after all live gates pass, publish a production claim or enable telephony.
+- [ ] Import real reviewed company inventory, source versions and brochures/FAQs; confirm no fixture seed in runtime.
+- [ ] Select the speech provider and verify `/readyz`; complete a real microphone→transcript→answer→audible response turn.
+- [ ] Run continuous turns, silence recovery, interruption, device switching and connection failure recovery on target browsers.
+- [ ] Benchmark speech-end→first audible response on representative calls; report p50/p95, failures and sample size. Required goal: under two seconds.
+- [ ] Evaluate Fish/ElevenLabs on identical UrduLish recordings; retain consented audio, blind scores and actual measured latency/cost assumptions.
+- [ ] Approve employee directory and Google OAuth scopes; book/reschedule/cancel in a test calendar, inspect employee notifications and outbox receipts.
+- [ ] Import n8n workflow, set distinct auth credentials and an idempotent CRM sink; verify retries and committed receipt matching.
+- [ ] Configure Twilio number, signed webhook and public TLS media endpoint; complete an inbound call. This depends on deferred hosting.
+- [ ] Approve privacy/retention and backup restoration procedure; keep secrets out of evidence files.
+
+## Deployment — deferred by user
+
+The Dockerfile builds frontend assets and the Python runtime; Compose prepares PostgreSQL,
+migrations, API, worker and optional n8n. A running Docker daemon is needed to build/execute it.
+Pin the selected n8n image tag/digest before a reproducible release; do not rely on `latest`.
+Deployment additionally needs trusted-proxy/origin settings, secret management, TLS, durable
+monitoring, backups, resource/call limits and an operator rollback plan. No hosted environment,
+carrier acceptance, uptime SLA or production readiness is claimed by this local handover.
+
+## Evidence bundle
+
+Retain timestamp, revision/worktree status, dependency versions, executed command, exit status,
+case-level JSON and redacted traces. Identify fixture vs real input; distinguish configuration,
+provider contract tests and actual end-to-end runs. List every remaining blocker. Human reviewers
+must fill their own scores; do not prefill the rubric with invented results.
+
+See the [current verification report](VERIFICATION_REPORT.md) for the final executed checks and saved evidence.

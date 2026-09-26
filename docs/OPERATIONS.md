@@ -2,11 +2,17 @@
 
 ## Local process order
 
-1. Copy `.env.example` to `.env` and set `DATABASE_URL` for PostgreSQL when needed.
-2. Run `cd backend && alembic upgrade head` against the configured database.
-3. Start the API with `python run.py`.
-4. Start the appointment worker with `python worker.py`.
-5. Start the browser with `npm run dev --prefix frontend`.
+1. Copy `.env.example` to `.env` and set `OPENAI_API_KEY` locally.
+2. Install the live voice dependencies with `backend/venv/bin/pip install -e 'backend[providers,voice-openai]'`.
+3. For local work, start the API with `python run.py`; it creates the SQLite schema without inserting sample listings.
+4. Start `python worker.py` only when a real outbox integration is configured.
+5. Build and open the browser with `npm run build --prefix frontend` and `http://localhost:8000`.
+
+The default live voice path uses OpenAI Realtime transcription, the structured OpenAI agent, and
+OpenAI speech generation. `/readyz` must report `mode: live`, `live_voice.status: configured`, and
+`providers.openai_voice_ready: true`. A missing SDK, key, or upstream account entitlement blocks
+voice startup; the UI does not switch to browser speech recognition. Property search remains empty
+until a verified CSV/JSON inventory is imported.
 
 No Docker or n8n process is required.
 
@@ -37,12 +43,12 @@ Outside development, startup fails closed unless `DATABASE_URL` is PostgreSQL an
 
 ## Common states
 
-- `audio_input_available=false`: Deepgram SDK or key is missing; text WebSocket remains usable.
+- `audio_input_available=false`: the selected server-side speech-recognition provider is unavailable; inspect `/readyz` and restart after installing dependencies or changing `.env`.
 - `audio_unavailable`: TTS provider is disabled, missing, or failed; the browser keeps the written
   answer visible and does not silently switch to its built-in speech engine.
 - Outbox `delivered_at` is null: inspect `attempts`, `last_error`, and `next_attempt_at`. Missing
   Google OAuth intentionally leaves events pending rather than fabricating delivery.
-- `/readyz` degraded: inspect the provider booleans and configure only the integrations in scope.
+- `/readyz` degraded: the API or live voice path is not ready. Inspect provider booleans; the UI blocks voice instead of switching to browser recognition.
 - `/healthz` reports that the API process responds. `/readyz` separately reports database
   availability and whether the live voice chain is configured (`live_voice.status` and
   `live_voice.blockers`). Provider configuration is not proof that an upstream account accepts
@@ -66,5 +72,5 @@ Outside development, startup fails closed unless `DATABASE_URL` is PostgreSQL an
 - Keep `.env`, OAuth token JSON, and provider keys outside source control.
 - Never store raw audio. Transcript rows are redacted and expire after thirty days.
 - Use the audit ledger and outbox payloads for incident review; they exclude contact email content.
-- A live release requires consent/recording policy, provider contracts, and measured latency and
-  retrieval evidence; local fixtures are not a production claim.
+- Production release still requires PostgreSQL, production secrets, provider contracts, a real
+  inventory source, consent/recording policy, and measured latency and retrieval evidence.

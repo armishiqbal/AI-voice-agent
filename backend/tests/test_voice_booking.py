@@ -17,7 +17,7 @@ def _setup() -> tuple[SqlPropertyRepository, SqlAppointmentService]:
     Base.metadata.drop_all(bind=engine)
     create_schema_for_local_development()
     properties = SqlPropertyRepository()
-    properties.import_properties(demo_properties())
+    properties.import_properties(demo_properties(), source="demo-fixture")
     return properties, SqlAppointmentService(properties)
 
 
@@ -47,8 +47,8 @@ def test_voice_booking_requires_consent_slot_choice_and_explicit_confirmation() 
 
         confirmed = flow.handle("haan", decision, ["PROP-001"], contact, "conversation-a")
         assert confirmed is not None and confirmed.appointment is not None
-        assert confirmed.appointment["status"] == "test_booked"
-        assert "test visit" in confirmed.decision.spoken_text
+        assert confirmed.appointment["status"] == "pending_calendar"
+        assert "Calendar confirmation pending" in confirmed.decision.spoken_text
         assert flow.phase == "idle"
     finally:
         _teardown()
@@ -166,26 +166,184 @@ def test_voice_booking_resolves_property_by_area_and_colloquial_confirmation() -
         decision = AgentDecision(kind="book", spoken_text="book")
 
         # When 2 properties are candidates, flow enters 'property' phase
-        started = flow.handle("book visit", decision, ["PROP-001", "PROP-002"], contact, "conv-natural")
+        started = flow.handle(
+            "book visit", decision, ["PROP-001", "PROP-002"], contact, "conv-natural"
+        )
         assert started is not None
         assert flow.phase == "property"
 
         # User refers to property by area: 'Clifton wala'
-        selected = flow.handle("Clifton wala", decision, ["PROP-001", "PROP-002"], contact, "conv-natural")
+        selected = flow.handle(
+            "Clifton wala", decision, ["PROP-001", "PROP-002"], contact, "conv-natural"
+        )
         assert selected is not None
         assert flow.phase == "slots"
         assert flow.property_id == "PROP-002"
 
         # User selects slot using colloquial Urdu ordinal: 'pehla wala'
-        slot_chosen = flow.handle("pehla wala option", decision, ["PROP-001", "PROP-002"], contact, "conv-natural")
+        slot_chosen = flow.handle(
+            "pehla wala option", decision, ["PROP-001", "PROP-002"], contact, "conv-natural"
+        )
         assert slot_chosen is not None
         assert flow.phase == "confirm"
 
         # User confirms using natural Urdu phrase: 'ji haan bilkul'
-        confirmed = flow.handle("ji haan bilkul", decision, ["PROP-001", "PROP-002"], contact, "conv-natural")
+        confirmed = flow.handle(
+            "ji haan bilkul", decision, ["PROP-001", "PROP-002"], contact, "conv-natural"
+        )
         assert confirmed is not None and confirmed.appointment is not None
-        assert confirmed.appointment["status"] == "test_booked"
+        assert confirmed.appointment["status"] == "pending_calendar"
         assert flow.phase == "idle"
     finally:
         _teardown()
 
+
+def _book_for_management(appointments, email="ali@example.com"):
+    return appointments.book(
+        AppointmentRequest(
+            property_id="PROP-001",
+            employee="Ayesha Khan",
+            starts_at=appointments.available_slots("PROP-001")[0],
+            client_name="Ali Khan",
+            contact_email=email,
+            consent=True,
+        )
+    )
+
+
+def test_voice_cancellation_requires_reference_matching_contact_and_confirmation():
+    properties, appointments = _setup()
+    try:
+        existing = _book_for_management(appointments)
+        flow = VoiceBookingFlow(properties, appointments)
+        decision = AgentDecision(kind="cancel", spoken_text="cancel")
+        contact = AppointmentContactContext(
+            client_name="Ali Khan", contact_email="ali@example.com", consent=True
+        )
+        reply = flow.handle("cancel my appointment", decision, [], contact, "cancel-voice")
+        assert flow.phase == "manage_reference" and "AES" in reply.decision.spoken_text
+        flow.handle(existing.reference, decision, [], contact, "cancel-voice")
+        assert flow.phase == "manage_confirm"
+        assert (
+            appointments.get_for_contact(existing.reference, str(contact.contact_email)).status
+            == "booked"
+        )
+        reply = flow.handle("maybe", decision, [], contact, "cancel-voice")
+        assert reply.appointment is None and flow.phase == "manage_confirm"
+        reply = flow.handle("yes cancel it", decision, [], contact, "cancel-voice")
+        assert reply.appointment["action"] == "cancellation"
+        assert (
+            appointments.get_for_contact(existing.reference, str(contact.contact_email)).status
+            == "cancelled"
+        )
+    finally:
+        _teardown()
+
+
+def test_voice_management_wrong_contact_cannot_read_or_cancel_appointment():
+    properties, appointments = _setup()
+    try:
+        existing = _book_for_management(appointments)
+        flow = VoiceBookingFlow(properties, appointments)
+        decision = AgentDecision(kind="cancel", spoken_text="cancel")
+        stranger = AppointmentContactContext(
+            client_name="Other Person", contact_email="other@example.com", consent=True
+        )
+        reply = flow.handle("cancel " + existing.reference, decision, [], stranger, "wrong-contact")
+        assert "match nahi" in reply.decision.spoken_text
+        assert flow.management_reference is None
+        reply = flow.handle("haan", decision, [], stranger, "wrong-contact")
+        assert reply.appointment is None
+        assert (
+            appointments.get_for_contact(existing.reference, "ali@example.com").status == "booked"
+        )
+    finally:
+        _teardown()
+
+
+def test_voice_reschedule_and_decline_leave_original_until_confirmed():
+    properties, appointments = _setup()
+    try:
+        existing = _book_for_management(appointments)
+        flow = VoiceBookingFlow(properties, appointments)
+        decision = AgentDecision(kind="reschedule", spoken_text="reschedule")
+        contact = AppointmentContactContext(
+            client_name="Ali Khan", contact_email="ali@example.com", consent=True
+        )
+        flow.handle("reschedule " + existing.reference, decision, [], contact, "reschedule-voice")
+        assert flow.phase == "manage_slots"
+        flow.handle("first", decision, [], contact, "reschedule-voice")
+        new_slot = flow.selected_slot
+        assert flow.phase == "manage_confirm"
+        reply = flow.handle("no do not confirm", decision, [], contact, "reschedule-voice")
+        assert reply.appointment is None and flow.phase == "idle"
+        assert (
+            appointments.get_for_contact(existing.reference, "ali@example.com").starts_at
+            == existing.starts_at
+        )
+        flow.handle("reschedule " + existing.reference, decision, [], contact, "reschedule-voice")
+        flow.handle("first", decision, [], contact, "reschedule-voice")
+        reply = flow.handle("haan", decision, [], contact, "reschedule-voice")
+        assert reply.appointment["action"] == "reschedule"
+        changed = appointments.get_for_contact(existing.reference, "ali@example.com")
+        assert changed.status == "rescheduled"
+        assert changed.starts_at != existing.starts_at
+        assert new_slot is not None
+    finally:
+        _teardown()
+
+
+def test_management_rechecks_contact_if_form_changes_before_confirmation():
+    properties, appointments = _setup()
+    try:
+        existing = _book_for_management(appointments)
+        flow = VoiceBookingFlow(properties, appointments)
+        decision = AgentDecision(kind="cancel", spoken_text="cancel")
+        contact = AppointmentContactContext(
+            client_name="Ali Khan", contact_email="ali@example.com", consent=True
+        )
+        flow.handle("cancel " + existing.reference, decision, [], contact, "changed-contact")
+        stranger = contact.model_copy(update={"contact_email": "other@example.com"})
+        result = flow.handle("yes", decision, [], stranger, "changed-contact")
+        assert result.appointment is None
+        assert (
+            appointments.get_for_contact(existing.reference, "ali@example.com").status == "booked"
+        )
+    finally:
+        _teardown()
+
+
+def test_voice_booking_forwards_preferences_to_notification_payload():
+    from sqlalchemy import select
+
+    from app.repositories.database import SessionLocal
+    from app.repositories.records import OutboxEventRecord
+
+    properties, appointments = _setup()
+    try:
+        flow = VoiceBookingFlow(properties, appointments)
+        decision = AgentDecision(kind="book", spoken_text="book")
+        contact = AppointmentContactContext(
+            client_name="Ali Khan", contact_email="ali@example.com", consent=True
+        )
+        flow.handle(
+            "book",
+            decision,
+            ["PROP-001"],
+            contact,
+            "preferences",
+            "Budget PKR: 30000000; Area: DHA",
+        )
+        flow.handle("first", decision, ["PROP-001"], contact, "preferences")
+        result = flow.handle("haan", decision, ["PROP-001"], contact, "preferences")
+        assert result.appointment is not None
+        with SessionLocal() as session:
+            event = session.scalar(
+                select(OutboxEventRecord).where(
+                    OutboxEventRecord.event_type == "appointment.booked"
+                )
+            )
+            assert event.payload["requirements"] == "Budget PKR: 30000000; Area: DHA"
+            assert "explicitly confirmed" in event.payload["meeting_notes"]
+    finally:
+        _teardown()

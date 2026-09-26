@@ -97,11 +97,18 @@ test("parseServerEvent validates consent status and non-PII appointment outcomes
   })), null);
   assert.equal(protocol.parseServerEvent(JSON.stringify({
     type: "appointment_result",
-    status: "test_booked",
+    status: "pending_calendar",
     reference: "AES-0123456789",
     property_id: "PROP-001",
     starts_at: "2026-09-23T10:00:00+05:00",
-  })).status, "test_booked");
+  })).status, "pending_calendar");
+  assert.equal(protocol.parseServerEvent(JSON.stringify({
+    type: "appointment_result",
+    status: "confirmed",
+    reference: "AES-0123456789",
+    property_id: "PROP-001",
+    starts_at: "2026-09-23T10:00:00+05:00",
+  })), null);
 });
 
 test("audioUplinkState stops capture before the browser send queue grows without bound", () => {
@@ -126,7 +133,26 @@ test("adaptive voice activity detection learns background noise and bounds long 
   for (let index = 0; index < 12; index += 1) {
     assert.equal(vad.process(0.006, 100), null);
   }
-  assert.equal(vad.process(0.03, 100), "speech_started");
+  assert.equal(vad.process(0.01, 100), null);
+  assert.equal(vad.process(0.01, 100), "speech_started");
   assert.equal(vad.process(0.03, 500), null);
   assert.equal(vad.process(0.03, 500), "speech_ended");
+});
+
+test("a short microphone click does not begin a voice turn", () => {
+  const vad = new vadModule.VoiceActivityDetector();
+  assert.equal(vad.process(0.001, 350), null);
+  assert.equal(vad.process(0.1, 85), null);
+  assert.equal(vad.process(0.001, 85), null);
+  assert.equal(vad.process(0.01, 85), null);
+  assert.equal(vad.process(0.01, 85), "speech_started");
+});
+
+
+test("appointment outcome actions are bounded", () => {
+  const event = { type: "appointment_result", status: "pending_calendar", reference: "AES-123", property_id: "PROP-001", starts_at: "2026-09-27T10:00:00Z" };
+  for (const action of ["cancellation", "reschedule"]) {
+    assert.equal(protocol.parseServerEvent(JSON.stringify({ ...event, action })).action, action);
+  }
+  assert.equal(protocol.parseServerEvent(JSON.stringify({ ...event, action: "delete_all" })), null);
 });
