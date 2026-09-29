@@ -30,6 +30,16 @@ def test_in_memory_property_repository_does_not_seed_sample_inventory() -> None:
     assert repository.get_available("PROP-001") is None
 
 
+def test_agent_does_not_recommend_when_live_inventory_is_empty() -> None:
+    agent = EstateAgent(EmptyByDefaultPropertyRepository())
+    decision = agent.respond(
+        "empty-live-inventory", "I want to buy in Karachi with a budget of 3 crore"
+    )
+    assert decision.kind == "ask_clarification"
+    assert decision.property_ids == []
+    assert "verified listings" in decision.spoken_text.lower()
+
+
 def test_recommends_available_sale_property():
     decision = EstateAgent(PropertyRepository()).respond(
         "one", "Mera budget 3 crore hai, Karachi mein buy karna hai"
