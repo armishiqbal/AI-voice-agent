@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import datetime, time
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from app.domain.fixtures import demo_properties
 from app.domain.models import (
     Appointment,
     AppointmentRequest,
@@ -16,8 +16,13 @@ from app.domain.models import (
 
 
 class PropertyRepository:
-    def __init__(self) -> None:
-        self._properties = {item.id: item for item in demo_properties()}
+    def __init__(self, properties: Iterable[Property] = ()) -> None:
+        """Build an in-memory repository from explicitly supplied records.
+
+        Empty by default so a newly constructed repository cannot accidentally
+        expose evaluation fixtures as live inventory.
+        """
+        self._properties = {item.id: item for item in properties}
 
     def list(self, query: PropertyQuery | None = None) -> list[Property]:
         values = list(self._properties.values())

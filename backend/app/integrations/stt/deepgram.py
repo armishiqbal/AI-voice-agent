@@ -12,6 +12,8 @@ class STTEvent:
     text: str = ""
     language: str = "und"
     confidence: float | None = None
+    audio_start_seconds: float | None = None
+    audio_duration_seconds: float | None = None
     is_final: bool = False
     speech_final: bool = False
     speech_started: bool = False
@@ -77,6 +79,29 @@ def _value(message: object, key: str, default: Any = None) -> Any:
     return getattr(message, key, default)
 
 
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 and number < float("inf") else None
+
+
+def estimated_transcript_lag_ms(
+    audio_cursor_seconds: float,
+    event: STTEvent,
+) -> float | None:
+    """Estimate sent-audio lead over Deepgram's returned transcript cursor."""
+    if event.audio_start_seconds is None or event.audio_duration_seconds is None:
+        return None
+    lag_ms = (
+        audio_cursor_seconds - event.audio_start_seconds - event.audio_duration_seconds
+    ) * 1000
+    return lag_ms if lag_ms >= 0 and lag_ms < float("inf") else None
+
+
 def parse_deepgram_message(message: object) -> STTEvent | None:
     """Convert SDK result objects or test dictionaries into our stable event."""
 
@@ -99,6 +124,8 @@ def parse_deepgram_message(message: object) -> STTEvent | None:
         text=text,
         language=str(language or "und"),
         confidence=float(_value(alternative, "confidence", 0.0) or 0.0),
+        audio_start_seconds=_finite_number(_value(message, "start")),
+        audio_duration_seconds=_finite_number(_value(message, "duration")),
         is_final=bool(_value(message, "is_final", False)),
         speech_final=bool(_value(message, "speech_final", False)),
         from_finalize=bool(_value(message, "from_finalize", False)),

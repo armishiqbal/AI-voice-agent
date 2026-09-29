@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from "react";
 
 type NeuralOrbProps = {
-  voicePhase: "checking" | "blocked" | "idle" | "connecting" | "authenticating" | "starting_microphone" | "listening" | "thinking" | "speaking" | "error";
+  voicePhase: "checking" | "blocked" | "idle" | "connecting" | "authenticating" | "starting_microphone" | "listening" | "transcribing" | "thinking" | "speaking" | "error";
   isAudioActive?: boolean;
   onClick?: () => void;
   audioAnalyser?: AnalyserNode | null;
@@ -88,6 +88,14 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
         coreColor = "rgba(52, 211, 153, 0.35)"; // green reactive
         particleHue = 160; // cyan-green
         ringGlow = "rgba(52, 211, 153, 0.7)";
+      } else if (voicePhase === "transcribing") {
+        speedY = 0.02;
+        speedX = 0.008;
+        pulseAmp = 8;
+        waveFreq = 5;
+        coreColor = "rgba(56, 189, 248, 0.38)";
+        particleHue = 195;
+        ringGlow = "rgba(56, 189, 248, 0.72)";
       } else if (voicePhase === "thinking") {
         speedY = 0.028;
         speedX = 0.015;
@@ -314,11 +322,11 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
       onClick={onClick}
       aria-label={voicePhase === "connecting" || voicePhase === "authenticating" || voicePhase === "starting_microphone"
         ? "Voice chat is connecting"
-        : voicePhase === "listening" || voicePhase === "thinking" || voicePhase === "speaking"
+        : voicePhase === "listening" || voicePhase === "transcribing" || voicePhase === "thinking" || voicePhase === "speaking"
           ? "Stop voice chat"
           : "Start or retry voice chat"}
-      aria-busy={voicePhase === "connecting" || voicePhase === "authenticating" || voicePhase === "starting_microphone"}
-      aria-pressed={voicePhase === "listening" || voicePhase === "thinking" || voicePhase === "speaking"}
+      aria-busy={voicePhase === "connecting" || voicePhase === "authenticating" || voicePhase === "starting_microphone" || voicePhase === "transcribing" || voicePhase === "thinking"}
+      aria-pressed={voicePhase === "listening" || voicePhase === "transcribing" || voicePhase === "thinking" || voicePhase === "speaking"}
       title="Start or stop voice chat"
     >
       <canvas

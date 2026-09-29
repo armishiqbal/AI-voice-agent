@@ -16,7 +16,13 @@ export type RuntimeReadiness = {
   blockers: string[];
 };
 
+export type StructuredReasoningStatus = {
+  status: "unconfigured" | "configured_unverified" | "cooldown" | "provider_error";
+  failureCategory: "rate_limited" | "authentication_failed" | "timeout" | "invalid_response" | "provider_error" | null;
+};
+
 export function parseRuntimeReadiness(value: unknown): RuntimeReadiness | null;
+export function parseStructuredReasoningStatus(value: unknown): StructuredReasoningStatus | null;
 
 export function resolveVoiceNotReadyMessage(mode: string): string;
 

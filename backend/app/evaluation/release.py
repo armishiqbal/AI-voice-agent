@@ -9,6 +9,7 @@ import httpx
 
 from app.agents.graph import EstateAgent
 from app.core.config import Settings
+from app.domain.fixtures import demo_properties
 from app.evaluation.appointments import run_appointment_evaluation
 from app.evaluation.conversations import load_conversation_cases, run_conversation_evaluation
 from app.evaluation.memory import load_memory_cases, run_memory_evaluation
@@ -169,7 +170,7 @@ def build_release_report(
     runtime_readiness: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Return an evidence-scoped report with live provider readiness probes."""
-    repository = PropertyRepository()
+    repository = PropertyRepository(demo_properties())
     safety = run_evaluation(
         lambda: EstateAgent(repository),
         load_cases(root / "evals" / "conversations.json"),

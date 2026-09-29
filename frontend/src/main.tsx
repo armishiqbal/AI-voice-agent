@@ -11,6 +11,8 @@ import {
   resolveAudioUnavailableMessage,
   resolveDisplayedVoicePhase,
   parseRuntimeReadiness,
+  parseStructuredReasoningStatus,
+  type StructuredReasoningStatus,
   type RuntimeReadiness,
   resolveSttUnavailableMessage,
   resolveVoiceNotReadyMessage,
@@ -45,7 +47,7 @@ type Property = {
 };
 
 type Message = { role: "customer" | "agent"; text: string; time: string };
-type VoicePhase = "checking" | "blocked" | "idle" | "connecting" | "authenticating" | "starting_microphone" | "listening" | "thinking" | "speaking" | "error";
+type VoicePhase = "checking" | "blocked" | "idle" | "connecting" | "authenticating" | "starting_microphone" | "listening" | "transcribing" | "thinking" | "speaking" | "error";
 type VoiceFailureStage = "session" | "microphone" | "transcription" | "agent" | "playback";
 type FeedbackTone = "info" | "pending" | "success" | "error";
 type VoiceMode = "standard" | "openai" | "hybrid";
@@ -119,6 +121,7 @@ const voicePhaseLabels: Record<VoicePhase, string> = {
   authenticating: "Authenticating security token…",
   starting_microphone: "Starting microphone…",
   listening: "Listening… Speak your requirement",
+  transcribing: "Finishing speech recognition…",
   thinking: "Searching available inventory…",
   speaking: "Awaaz Estate is responding…",
   error: "Voice connection failed. Use the voice button to reconnect.",
@@ -152,6 +155,8 @@ function App() {
   const [canReplayResponse, setCanReplayResponse] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [voicePhase, setVoicePhase] = useState<VoicePhase>("checking");
+  const voicePhaseRef = useRef(voicePhase);
+  useEffect(() => { voicePhaseRef.current = voicePhase; }, [voicePhase]);
   const voiceFailureStageRef = useRef<VoiceFailureStage | null>(null);
   const [voiceFailureStage, setVoiceFailureStageState] = useState<VoiceFailureStage | null>(null);
   const setVoiceFailureStage = (stage: VoiceFailureStage | null) => {
@@ -186,6 +191,7 @@ function App() {
   const [appointmentStatus, setAppointmentStatus] = useState("");
   const [appointmentTone, setAppointmentTone] = useState<FeedbackTone>("info");
   const [runtimeReadiness, setRuntimeReadiness] = useState<RuntimeReadiness | null>(null);
+  const [reasoningProviderStatus, setReasoningProviderStatus] = useState<StructuredReasoningStatus | null>(null);
   const [readinessCheckFailed, setReadinessCheckFailed] = useState(false);
   const [readinessRefreshKey, setReadinessRefreshKey] = useState(0);
   const [selectedPropertyId, setSelectedPropertyId] = useState<string>("");
@@ -243,6 +249,7 @@ function App() {
       acknowledgementAudioPending.current = false;
     },
     onDrain: () => {
+      if (voicePhaseRef.current === "transcribing") return;
       const captureReady = audioAvailableRef.current && voiceFailureStageRef.current === null;
       setVoicePhase(serverPhase.current === "listening"
         ? captureReady ? "listening" : "starting_microphone"
@@ -309,8 +316,8 @@ function App() {
     {
       id: "transcription",
       label: "Speech",
-      state: transcriptFinalized ? "done" : voiceFailureStage === "transcription" ? "failed" : audioAvailable ? "active" : "waiting",
-      detail: transcriptFinalized ? "Recognized" : voiceFailureStage === "transcription" ? "Recognition failed" : audioAvailable ? "Waiting for speech" : "Waiting",
+      state: transcriptFinalized ? "done" : voiceFailureStage === "transcription" ? "failed" : displayVoicePhase === "transcribing" || audioAvailable ? "active" : "waiting",
+      detail: transcriptFinalized ? "Recognized" : voiceFailureStage === "transcription" ? "Recognition failed" : displayVoicePhase === "transcribing" ? "Finalizing transcript" : audioAvailable ? "Waiting for speech" : "Waiting",
     },
     {
       id: "agent",
@@ -375,11 +382,14 @@ function App() {
         const readiness = parseRuntimeReadiness(value);
         if (!readiness) throw new Error("Readiness response was invalid");
         if (!active) return;
+        const readinessRecord = value as Record<string, unknown>;
+        const reasoningStatus = parseStructuredReasoningStatus(readinessRecord.structured_reasoning);
+        if (reasoningStatus) setReasoningProviderStatus(reasoningStatus);
         const configured = readiness.providers[readinessKey] === true;
         setReadinessCheckFailed(false);
         setRuntimeReadiness(readiness);
         setVoicePhase((current) =>
-          ["connecting", "authenticating", "listening", "thinking", "speaking", "error"].includes(current)
+          ["connecting", "authenticating", "listening", "transcribing", "thinking", "speaking", "error"].includes(current)
             ? current
             : configured ? "idle" : "blocked"
         );
@@ -450,6 +460,8 @@ function App() {
     finishSpeech.current = () => {
       if (capture.current !== nextCapture || ws.readyState !== WebSocket.OPEN) return;
       manuallyCommitted = true;
+      voicePhaseRef.current = "transcribing";
+      setVoicePhase("transcribing");
       voiceTurnEndedAt.current = performance.now();
       answerAudioOriginAt.current = voiceTurnEndedAt.current;
       voiceTimingOrigin.current = "voice";
@@ -536,6 +548,8 @@ function App() {
                 voiceTurnEndedAt.current = performance.now();
                 answerAudioOriginAt.current = voiceTurnEndedAt.current;
                 voiceTimingOrigin.current = "voice";
+                voicePhaseRef.current = "transcribing";
+                setVoicePhase("transcribing");
                 setActiveActionLabel("Working on your request…");
                 if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "audio_turn_end" }));
               },
@@ -745,22 +759,25 @@ function App() {
             setAudioOutputUnavailable(false);
           }
           serverPhase.current = nextPhase;
-          if (shouldApplyServerVoicePhase(
+          const waitingForFinalTranscript = voicePhaseRef.current === "transcribing";
+          if (!waitingForFinalTranscript && shouldApplyServerVoicePhase(
             nextPhase,
             voiceFailureStageRef.current,
             audioAvailableRef.current,
           )) {
             if (nextPhase === "thinking" && playback.current.isActive) setVoicePhase("speaking");
             else if (nextPhase !== "listening" || !playback.current.isActive) setVoicePhase(nextPhase);
-          } else if (
+          } else if (!waitingForFinalTranscript && (
             nextPhase === "listening"
             && voiceFailureStageRef.current === null
             && !audioAvailableRef.current
-          ) {
+          )) {
             setVoicePhase("starting_microphone");
             setActiveActionLabel("Starting microphone…");
           }
           if (
+            !waitingForFinalTranscript
+            &&
             nextPhase === "listening"
             && !audioOutputUnavailableRef.current
             && voiceFailureStageRef.current === null
@@ -783,6 +800,7 @@ function App() {
           setLiveTranscript(event.text);
           setTranscriptFinalized(true);
           setShowDrawer(true);
+          voicePhaseRef.current = playback.current.isActive ? "speaking" : "thinking";
           setVoicePhase(playback.current.isActive ? "speaking" : "thinking");
           setAgentDecisionLatencyMs(null);
           setSubstantiveAnswerLatencyMs(null);
@@ -790,6 +808,8 @@ function App() {
           setMessages((current) => [...current, { role: "customer", text: event.text ?? "", time: stamp() }]);
         }
         if (event.type === "agent_response" && event.decision) {
+          const reasoningStatus = parseStructuredReasoningStatus(event);
+          if (reasoningStatus) setReasoningProviderStatus(reasoningStatus);
           if (event.reasoning_status) {
             setRuntimeReadiness((current) => current
               ? {
@@ -1058,6 +1078,8 @@ function App() {
       if (httpTurnAbort.current !== controller) return;
       if (!response.ok) throw new Error(`Server returned ${response.status}`);
       const data = await response.json();
+      const reasoningStatus = parseStructuredReasoningStatus(data);
+      if (reasoningStatus) setReasoningProviderStatus(reasoningStatus);
       setLastTiming({ label: "Text request", milliseconds: Math.round(performance.now() - start) });
       const decision = data.decision || data;
       const reply =
@@ -1271,13 +1293,13 @@ function App() {
                 Provider access is checked when the live voice session starts.
               </p>
             )}
-            {(runtimeReadiness?.reasoningStatus === "cooldown" || runtimeReadiness?.reasoningStatus === "provider_error") && (
+            {(reasoningProviderStatus?.status === "cooldown" || reasoningProviderStatus?.status === "provider_error") && (
               <div className="voice-reasoning-warning" role="status">
-                <strong>{runtimeReadiness.reasoningFailureCategory === "rate_limited"
+                <strong>{reasoningProviderStatus.failureCategory === "rate_limited"
                   ? "OpenAI is rate limiting model requests."
-                  : runtimeReadiness.reasoningFailureCategory === "authentication_failed"
+                  : reasoningProviderStatus.failureCategory === "authentication_failed"
                     ? "OpenAI rejected the model credentials."
-                    : runtimeReadiness.reasoningFailureCategory === "timeout"
+                    : reasoningProviderStatus.failureCategory === "timeout"
                       ? "OpenAI model requests are timing out."
                       : "OpenAI model reasoning is unavailable."}</strong>
                 <span> Voice is using deterministic fallback responses. Check the provider status and account limits.</span>
@@ -1348,13 +1370,13 @@ function App() {
                 )}
               </details>
             )}
-            {connected && (liveTranscript || displayVoicePhase === "listening") && (
+            {connected && (liveTranscript || displayVoicePhase === "listening" || displayVoicePhase === "transcribing") && (
               <div className="voice-live-transcript" aria-live="polite" aria-atomic="true">
                 <span className="voice-live-transcript-label">
                   <span className="voice-live-transcript-dot" />
-                  {liveTranscript ? "LIVE TRANSCRIPT" : "YOUR TURN"}
+                  {liveTranscript ? "LIVE TRANSCRIPT" : displayVoicePhase === "transcribing" ? "TRANSCRIBING" : "YOUR TURN"}
                 </span>
-                <p>{liveTranscript || "Speak naturally. I’m listening."}</p>
+                <p>{liveTranscript || (displayVoicePhase === "transcribing" ? "Finishing your request…" : "Speak naturally. I’m listening.")}</p>
               </div>
             )}
             {subtitles && !showDrawer && (

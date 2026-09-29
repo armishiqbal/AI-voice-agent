@@ -34,35 +34,34 @@ Appointment transaction → PostgreSQL outbox → python worker.py
 ## Remaining end-to-end execution plan (current baseline)
 
 This is the current acceptance baseline as of 2026-09-29; it does not claim production
-readiness. The current local suite baseline (2026-09-29) reports 331 backend tests passed and
-five SQLite-only skips; the current PostgreSQL run reports 341 passed and two optional FAISS skips.
-The frontend has 63 passing tests and a successful production build, and 44/44 multi-turn fixture
-conversations pass. The hybrid Deepgram
-adapter now sends `Finalize` at each browser VAD boundary, keeps the provider WebSocket alive with
-five-second `KeepAlive` messages between turns, and sends `CloseStream` only when the voice session
-ends. Stable finalized segments are coalesced before agent processing; its focused regression,
-Python compilation, and Ruff checks pass. The latest 300 ms Deepgram endpointing run (2026-09-29)
-returned final transcripts, contextual agent replies and final audio on all three turns of one
-synthetic conversation; context retained Karachi, budget, rent and DHA. Substantive audio took
-2.06–2.71 seconds, so the two-second gate is still missed. A preceding 700 ms run timed out on all
-three turns, and earlier 300/500 ms trials were inconsistent; 300 ms is the current default based
-on the newest complete run, not a reliability or p95 claim. The two-second conversational response
-gate is not met.
-Two additional independent three-turn hybrid loopbacks (2026-09-29) completed 6/6 turns with
-contextual replies and substantive audio at 1.17–1.59 seconds. These are generated-audio samples;
-earlier slow and failed runs still prevent a reliability or p95 claim, and human/browser acceptance
-is still pending.
-Follow-up isolated runs at 100 ms and 200 ms each brought two of three synthetic answers under two
-seconds, but both lost part of the first spoken request in its final transcript; neither setting is
-safe to promote. An opt-in sentence-level TTS run at 300 ms had one transcription recovery and two
-slow turns, so the setting remains disabled and that run is not a valid TTS A/B. Keep the 300 ms
-default while continuing to improve latency without sacrificing transcript completeness.
-Synthetic speech does not verify human recognition or physical playback. The two-second route
-remains unproven as a reliable threshold.
-These samples do not establish p95, human
-quality, real-company grounding, or physical-device playback. Calendar, Gmail, and telephony
-remain unconfigured, and live property inventory is empty. See `CAPSTONE_REQUIREMENTS.md` and
-`VERIFICATION_REPORT.md` for current gate details.
+readiness. The latest full local checks report 359 backend tests passed and 5 skipped, 64 frontend
+tests passed, a successful production build, and passing Ruff, compilation, and diff checks. Backend
+WebSocket tests now stub STT so configured local provider credentials cannot make unit tests open
+live provider sockets. Deterministic capstone fixtures remain local-only evidence.
+
+The hybrid Deepgram adapter sends `Finalize` at each browser VAD boundary, keeps its provider
+WebSocket alive with five-second `KeepAlive` messages between turns, and sends `CloseStream` only
+when the voice session ends. Stable final transcript segments are coalesced before agent processing.
+The latest three-turn synthetic loopback returned 3/3 transcripts, replies, and audio, but only 1/3
+substantive replies began under two seconds (1,761.5, 5,732.7, and 6,393.7 ms). On the two slow
+turns, final STT consumed 5,070–5,583 ms; reasoning and final-transcript-to-audio were fast. A direct
+Nova-3 multilingual 100 ms trial completed all three final transcripts but only one within two
+seconds and dropped the city/home request on the first turn, so it was rejected and the 300 ms
+default remains. These generated-speech samples establish neither UrduLish quality nor p95,
+physical playback, or human microphone acceptance.
+
+The latest live typed-chat probe returned HTTP 200 with deterministic fallback at 1,545.7 ms after
+the structured reasoning provider timed out at its 1.5-second deadline; readiness reported
+degraded/cooldown immediately after the probe. A later read-only snapshot showed the cooldown had
+elapsed and the provider was `configured_unverified`, not verified. The UI reports provider
+reasoning state, but fallback behavior does not establish live model-generated decisions. Live
+inventory remains empty, and Calendar, Gmail, telephony, company documents, consented human scoring,
+and deployment acceptance remain outstanding. See `CAPSTONE_REQUIREMENTS.md` and
+`VERIFICATION_REPORT.md` for the requirement-by-requirement evidence.
+Deepgram STT results now preserve provider audio start/duration offsets and the runtime records the
+estimated sent-audio lead over the latest transcript cursor (`voice.stt_audio_cursor_lag_ms`). This
+is diagnostic instrumentation only; it requires a fresh provider-backed voice run to collect live
+measurements and does not change the model route or turn-acceptance boundary.
 
 JEV ranked the next major workstream against the known prerequisites and selected the live
 multilingual TTS proof gate first (1.0 recommendation probability and confidence, 2026-09-23).
@@ -104,7 +103,7 @@ CI preflight still requires the remote job to select PostgreSQL; hosted CI and h
 load/soak have not been run.
 
 The frontend CI job runs its Node test suite before the production build; the current local
-suite has 63 passing tests and `npm run build --prefix frontend` succeeds. Browser loopback
+suite has 64 passing tests and `npm run build --prefix frontend` succeeds. Browser loopback
 evidence uses generated audio and does not replace physical-device or human voice acceptance.
 JEV reviewed this workflow patch with a high composite (0.9365) but returned `escalate` because
 test-gap and blast-radius confidence were low; manual workflow inspection and local checks are the

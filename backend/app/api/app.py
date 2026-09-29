@@ -58,6 +58,7 @@ from app.integrations.stt import (
     build_openai_realtime_stt,
     build_stt_provider,
     build_urdu_hybrid_stt,
+    estimated_transcript_lag_ms,
     stt_provider_error_code,
 )
 from app.integrations.stt.deepgram import DeepgramStreamingSTT
@@ -748,10 +749,13 @@ def conversation_turn(conversation_id: str, turn: ConversationTurn):
     traces.observe("rest.decision_latency_ms", latency_ms)
     transcripts.append(conversation_id, "user", turn.text)
     transcripts.append(conversation_id, "assistant", decision.spoken_text)
+    reasoning_status = _structured_reasoning_status()
     return {
         "decision": decision,
         "retained_transcript": redact_for_retention(turn.text),
         "latency_ms": round(latency_ms, 2),
+        "reasoning_status": reasoning_status["status"],
+        "reasoning_failure_category": reasoning_status["last_failure_category"],
     }
 
 
@@ -1413,9 +1417,10 @@ async def voice_socket(websocket: WebSocket):
 
     async def bounded_stt_events(
         queue: asyncio.Queue[bytes | None],
+        audio: AsyncIterator[bytes],
     ) -> AsyncIterator[STTEvent]:
         """Bound commits and assemble Deepgram's stable transcript segments per turn."""
-        stream = session_stt.stream(audio_stream(queue))
+        stream = session_stt.stream(audio)
         iterator = stream.__aiter__()
         read_task: asyncio.Task[STTEvent] | None = None
         commit_task: asyncio.Task[bool] | None = None
@@ -1620,8 +1625,26 @@ async def voice_socket(websocket: WebSocket):
         failure_reason = "stt_stream_ended"
         completed_turns = 0
         recovery_delivered = False
+        audio_cursor_seconds = 0.0
+
+        async def counted_audio_stream() -> AsyncIterator[bytes]:
+            nonlocal audio_cursor_seconds
+            async for frame in audio_stream(queue):
+                if frame:
+                    audio_cursor_seconds += len(frame) / (2 * settings.stt_sample_rate)
+                yield frame
+
         try:
-            async for event in bounded_stt_events(queue):
+            async for event in bounded_stt_events(queue, counted_audio_stream()):
+                if (
+                    isinstance(session_stt, DeepgramStreamingSTT)
+                    and event.text
+                ):
+                    cursor_lag_ms = estimated_transcript_lag_ms(
+                        audio_cursor_seconds, event
+                    )
+                    if cursor_lag_ms is not None:
+                        traces.observe("voice.stt_audio_cursor_lag_ms", cursor_lag_ms)
                 if event.text and stt_turn_active:
                     if event.is_final:
                         stt_final_segments.append(event)
@@ -2221,45 +2244,75 @@ async def voice_socket(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        if stt_task is not None and not stt_task.done() and audio_queue is not None:
-            try:
-                audio_queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
-            try:
-                await asyncio.wait_for(stt_task, timeout=0.25)
-            except TimeoutError:
-                stt_task.cancel()
-        pending_tasks = list(turn_tasks)
-        if stt_task is not None:
-            pending_tasks.append(stt_task)
-        for task in pending_tasks:
-            if not task.done():
-                task.cancel()
-        if pending_tasks:
-            await asyncio.gather(*pending_tasks, return_exceptions=True)
-        if realtime_tts_warmup is not None and not realtime_tts_warmup.done():
-            realtime_tts_warmup.cancel()
-            await asyncio.gather(realtime_tts_warmup, return_exceptions=True)
-        if configured_tts_ack_warmup is not None and not configured_tts_ack_warmup.done():
-            configured_tts_ack_warmup.cancel()
-            await asyncio.gather(configured_tts_ack_warmup, return_exceptions=True)
-        if session_realtime_tts is not None:
-            await session_realtime_tts.aclose()
-        if isinstance(session_stt, OpenAIRealtimeSTT):
-            await session_stt.aclose()
         try:
-            await asyncio.to_thread(
-                record_voice_call_outcome,
-                conversation_id=conversation_id,
-                channel="browser",
-                duration_ms=max(0, int((time.perf_counter() - voice_call_started_at) * 1000)),
-                state=agent.states.get(conversation_id),
-                appointment_reference=appointment_reference,
-            )
-        except Exception:  # noqa: BLE001 - record failure is observable without leaking caller data
-            traces.increment("voice.call_outcome_persist_failure")
-        await release_session_lease()
+            if stt_task is not None and not stt_task.done() and audio_queue is not None:
+                try:
+                    audio_queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+                try:
+                    await asyncio.wait_for(stt_task, timeout=0.25)
+                except TimeoutError:
+                    stt_task.cancel()
+
+            pending_tasks = list(turn_tasks)
+            if stt_task is not None:
+                pending_tasks.append(stt_task)
+            for task in pending_tasks:
+                if not task.done():
+                    task.cancel()
+            if pending_tasks:
+                done, still_running = await asyncio.wait(pending_tasks, timeout=1.0)
+                if done:
+                    await asyncio.gather(*done, return_exceptions=True)
+                if still_running:
+                    traces.increment("voice:shutdown_task_timeout", len(still_running))
+                    for task in still_running:
+                        task.cancel()
+                        task.add_done_callback(_consume_background_task_result)
+
+            warmup_tasks = [
+                task
+                for task in (realtime_tts_warmup, configured_tts_ack_warmup)
+                if task is not None
+            ]
+            for task in warmup_tasks:
+                if not task.done():
+                    task.cancel()
+            if warmup_tasks:
+                done, still_running = await asyncio.wait(warmup_tasks, timeout=1.0)
+                if done:
+                    await asyncio.gather(*done, return_exceptions=True)
+                if still_running:
+                    traces.increment("voice:shutdown_warmup_timeout", len(still_running))
+                    for task in still_running:
+                        task.cancel()
+                        task.add_done_callback(_consume_background_task_result)
+
+            providers_to_close = []
+            if session_realtime_tts is not None:
+                providers_to_close.append(("tts", session_realtime_tts))
+            if isinstance(session_stt, OpenAIRealtimeSTT):
+                providers_to_close.append(("stt", session_stt))
+            for provider_name, provider in providers_to_close:
+                try:
+                    await asyncio.wait_for(provider.aclose(), timeout=1.0)
+                except Exception:  # noqa: BLE001 - cleanup must not retain a voice lease
+                    traces.increment(f"voice:{provider_name}_cleanup_timeout")
+
+            try:
+                await asyncio.to_thread(
+                    record_voice_call_outcome,
+                    conversation_id=conversation_id,
+                    channel="browser",
+                    duration_ms=max(0, int((time.perf_counter() - voice_call_started_at) * 1000)),
+                    state=agent.states.get(conversation_id),
+                    appointment_reference=appointment_reference,
+                )
+            except Exception:  # noqa: BLE001 - record failure is observable without leaking caller data
+                traces.increment("voice.call_outcome_persist_failure")
+        finally:
+            await release_session_lease()
 
 
 @app.websocket("/v1/telephony/media")

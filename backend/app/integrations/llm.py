@@ -4,6 +4,8 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Protocol
 
 from app.domain.models import AgentDecision
@@ -55,6 +57,58 @@ class OpenAIStructuredDecisionProvider:
         with self._request_lock:
             return getattr(self, "_last_failure_category", None)
 
+    @classmethod
+    def _failure_cooldown_seconds(cls, error: Exception) -> float:
+        """Honor a provider Retry-After hint without allowing unbounded backoff."""
+        if cls._failure_category(error) != "rate_limited":
+            return cls.FAILURE_COOLDOWN_SECONDS
+
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return cls.FAILURE_COOLDOWN_SECONDS
+
+        retry_after_ms = headers.get("retry-after-ms")
+        if retry_after_ms is not None:
+            try:
+                delay = float(retry_after_ms) / 1000
+            except (TypeError, ValueError):
+                delay = 0
+            if delay > 0:
+                return min(300.0, max(1.0, delay))
+
+        retry_after = headers.get("retry-after")
+        if retry_after is None:
+            return cls.FAILURE_COOLDOWN_SECONDS
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(str(retry_after))
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=UTC)
+                delay = (retry_at - datetime.now(UTC)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                return cls.FAILURE_COOLDOWN_SECONDS
+        return min(300.0, max(1.0, delay))
+
+    def _record_late_request_result(self, future: Future[AgentDecision]) -> None:
+        """Refresh sanitized status if the provider finishes after the caller deadline."""
+        try:
+            future.result()
+        except Exception as error:  # noqa: BLE001 - provider error details stay internal
+            category = self._failure_category(error)
+            cooldown = self._failure_cooldown_seconds(error)
+        else:
+            # A late success cannot be used for the already-finished turn.
+            category = "timeout"
+            cooldown = self.FAILURE_COOLDOWN_SECONDS
+        with self._request_lock:
+            if self._request_future is not future:
+                return
+            self._retry_after = time.monotonic() + cooldown
+            self._last_failure_category = category
+
     def decide(self, system_prompt: str, user_text: str) -> AgentDecision:
         with self._request_lock:
             if time.monotonic() < self._retry_after:
@@ -79,6 +133,7 @@ class OpenAIStructuredDecisionProvider:
             with self._request_lock:
                 self._retry_after = time.monotonic() + self.FAILURE_COOLDOWN_SECONDS
                 self._last_failure_category = "timeout"
+            future.add_done_callback(self._record_late_request_result)
             raise LLMDecisionError(
                 "Structured decision request exceeded its wall-clock deadline"
             ) from error
@@ -89,7 +144,7 @@ class OpenAIStructuredDecisionProvider:
             raise
         except Exception as error:
             with self._request_lock:
-                self._retry_after = time.monotonic() + self.FAILURE_COOLDOWN_SECONDS
+                self._retry_after = time.monotonic() + self._failure_cooldown_seconds(error)
                 self._last_failure_category = self._failure_category(error)
             raise LLMDecisionError(f"Structured model request failed: {error}") from error
         with self._request_lock:

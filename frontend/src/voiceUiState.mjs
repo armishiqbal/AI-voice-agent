@@ -11,6 +11,26 @@ function booleanRecord(value) {
   return Object.fromEntries(Object.entries(value).filter((entry) => typeof entry[1] === "boolean"));
 }
 
+const reasoningStatuses = new Set(["unconfigured", "configured_unverified", "cooldown", "provider_error"]);
+const reasoningFailureCategories = new Set([
+  "rate_limited",
+  "authentication_failed",
+  "timeout",
+  "invalid_response",
+  "provider_error",
+]);
+
+export function parseStructuredReasoningStatus(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const status = value.status ?? value.reasoning_status;
+  if (!reasoningStatuses.has(status)) return null;
+  const failureCategory = value.reasoning_failure_category ?? value.last_failure_category;
+  return {
+    status,
+    failureCategory: reasoningFailureCategories.has(failureCategory) ? failureCategory : null,
+  };
+}
+
 export function parseRuntimeReadiness(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   if (value.status !== "ready" && value.status !== "degraded") return null;

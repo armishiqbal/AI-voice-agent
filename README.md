@@ -57,7 +57,7 @@ python scripts/evaluation/evaluate_conversations.py
 python scripts/evaluation/evaluate_rag.py
 python scripts/evaluation/evaluate_memory.py
 python scripts/evaluation/evaluate_appointments.py
-python scripts/evaluation/release_report.py
+python scripts/evaluation/release_report.py --api-url http://127.0.0.1:8000
 ```
 
 PostgreSQL concurrency tests require PostgreSQL; SQLite cannot establish those guarantees.

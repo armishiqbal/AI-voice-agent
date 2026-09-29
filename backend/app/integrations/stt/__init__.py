@@ -6,6 +6,7 @@ from app.integrations.stt.deepgram import (
     STTProvider,
     STTProviderError,
     UnavailableSTTProvider,
+    estimated_transcript_lag_ms,
     parse_deepgram_message,
     stt_provider_error_code,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "build_openai_realtime_stt",
     "build_stt_provider",
     "build_urdu_hybrid_stt",
+    "estimated_transcript_lag_ms",
     "parse_deepgram_message",
     "parse_openai_transcription_event",
     "resample_pcm16_16k_to_24k",

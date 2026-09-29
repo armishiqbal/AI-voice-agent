@@ -47,6 +47,44 @@ def _receive_json_timeout(websocket, timeout_seconds: float = 5) -> dict[str, ob
     return json.loads(message["text"])
 
 
+def test_text_turn_returns_sanitized_structured_reasoning_status(monkeypatch) -> None:
+    import app.api.app as api
+
+    decision = AgentDecision(kind="ask_clarification", spoken_text="Which area do you prefer?")
+    monkeypatch.setattr(
+        api,
+        "agent",
+        SimpleNamespace(decision_provider=object(), respond=lambda *_args: decision),
+    )
+    monkeypatch.setattr(api, "_structured_reasoning_status", lambda: {
+        "configured": True,
+        "status": "provider_error",
+        "fallback": "deterministic",
+        "cooldown_remaining_seconds": 0.0,
+        "last_failure_category": "rate_limited",
+    })
+
+    class Traces:
+        def observe(self, *_args):
+            return None
+
+    class Transcripts:
+        def append(self, *_args):
+            return None
+
+    monkeypatch.setattr(api, "traces", Traces())
+    monkeypatch.setattr(api, "transcripts", Transcripts())
+    response = TestClient(api.app).post(
+        "/v1/conversations/test-conversation/turn",
+        json={"text": "I need a home in Karachi", "language": "en"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["decision"]["spoken_text"] == decision.spoken_text
+    assert response.json()["reasoning_status"] == "provider_error"
+    assert response.json()["reasoning_failure_category"] == "rate_limited"
+
+
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
@@ -548,9 +586,24 @@ def test_booking_contact_is_session_scoped_and_never_sent_to_agent_or_transcript
             if False:
                 yield None
 
+    class NoopSTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            async for frame in audio:
+                if frame is None:
+                    return
+                yield STTEvent(text="", is_final=False)
+
+    noop_stt = NoopSTT()
+
     monkeypatch.setattr(api.agent, "respond", respond)
     monkeypatch.setattr(api.transcripts, "append", lambda *args: retained.append(args))
     monkeypatch.setattr(api, "tts", EmptyTTS())
+    monkeypatch.setattr(api, "stt", noop_stt)
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: noop_stt)
+    monkeypatch.setattr(api, "build_english_hybrid_stt", lambda config: noop_stt)
     with SessionLocal() as session:
         existing_event_ids = set(
             session.scalars(
@@ -704,6 +757,21 @@ def test_voice_websocket_enforces_active_session_capacity_and_releases_lease(
     import app.api.app as api
     from app.repositories.database import Base
 
+    class NoopSTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            async for frame in audio:
+                if frame is None:
+                    return
+                yield STTEvent(text="", is_final=False)
+
+    noop_stt = NoopSTT()
+    monkeypatch.setattr(api, "stt", noop_stt)
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: noop_stt)
+    monkeypatch.setattr(api, "build_english_hybrid_stt", lambda config: noop_stt)
+
     database_engine = create_engine(
         f"sqlite:///{tmp_path / 'voice-session-capacity.db'}",
         connect_args={"check_same_thread": False},
@@ -828,7 +896,6 @@ def test_voice_session_records_separate_decision_tts_and_end_to_audio_latency(
         "observe",
         lambda name, value, limit=1000: measurements.setdefault(name, []).append(value),
     )
-
     with (
         TestClient(app) as client,
         client.websocket_connect(
@@ -853,6 +920,97 @@ def test_voice_session_records_separate_decision_tts_and_end_to_audio_latency(
     assert measurements["voice.final_transcript_to_first_audio_ms"]
     assert measurements["voice.tts_stream_duration_ms"]
     assert measurements["voice.final_transcript_to_first_audio_ms"][0] >= 0
+
+
+def test_hybrid_voice_records_deepgram_audio_cursor_lag_from_websocket_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+    from app.integrations.stt import DeepgramStreamingSTT
+
+    measurements: dict[str, list[float]] = {}
+
+    class CursorSTT(DeepgramStreamingSTT):
+        def __init__(self) -> None:
+            super().__init__(api_key="test-key", finalize_timeout_seconds=0.5)
+
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            if self.on_transport_ready is not None:
+                self.on_transport_ready()
+            async for frame in audio:
+                if frame == b"":
+                    yield STTEvent(
+                        text="Find me a home",
+                        language="en",
+                        confidence=0.99,
+                        audio_start_seconds=0.0,
+                        audio_duration_seconds=0.01,
+                        is_final=True,
+                        from_finalize=True,
+                    )
+
+    class FakeTTS:
+        async def synthesize_stream(self, text: str, language: str):
+            assert text == "A verified option is available."
+            yield AudioChunk(0, b"\x01\x00" * 80, language, 24_000)
+            yield AudioChunk(1, b"", language, 24_000, is_final=True)
+
+    provider = CursorSTT()
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: provider)
+    monkeypatch.setattr(api, "tts", FakeTTS())
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: AgentDecision(kind="answer", spoken_text="A verified option is available."),
+    )
+    monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    monkeypatch.setattr(
+        api.traces,
+        "observe",
+        lambda name, value, limit=1000: measurements.setdefault(name, []).append(value),
+    )
+    active_sessions_before = api.voice_sessions.capacity_snapshot()["active"]
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
+    assert issued is not None
+
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket:
+            _authenticate_voice_socket(websocket, issued[0])
+            websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+            while websocket.receive_json().get("audio_started") is not True:
+                pass
+            websocket.send_json({"type": "audio_turn_start"})
+            websocket.send_bytes(b"\x01\x00" * 160)
+            websocket.send_json({"type": "audio_turn_end"})
+            events = []
+            saw_final_audio = False
+            saw_listening = False
+            while not (saw_final_audio and saw_listening):
+                event = _receive_json_timeout(websocket)
+                events.append(event)
+                saw_final_audio |= event.get("type") == "audio_chunk" and event.get("is_final") is True
+                saw_listening |= event.get("type") == "state" and event.get("state") == "listening"
+            websocket.close()
+
+        # Let the WebSocket disconnect handler run on the still-live app loop.
+        cleanup_deadline = monotonic() + 2
+        while (
+            api.voice_sessions.capacity_snapshot()["active"] > active_sessions_before
+            and monotonic() < cleanup_deadline
+        ):
+            sleep(0.01)
+
+    assert any(event.get("type") == "transcript" and event.get("is_final") for event in events)
+    assert measurements["voice.stt_audio_cursor_lag_ms"] == [0.0]
+    # The dedicated capacity test below exercises server-side lease release.
+    # Close this test's persisted lease directly to avoid contaminating later tests.
+    api.voice_sessions.release(issued[0])
+    assert api.voice_sessions.capacity_snapshot()["active"] == active_sessions_before
 
 
 def test_realtime_tts_failure_falls_back_to_http_speech_before_first_audio(

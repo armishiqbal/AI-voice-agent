@@ -11,6 +11,7 @@ from time import perf_counter
 from pydantic import BaseModel, Field
 
 from app.agents.graph import EstateAgent
+from app.domain.fixtures import demo_properties
 from app.services.appointments import PropertyRepository
 
 
@@ -41,7 +42,7 @@ def run_conversation_evaluation(cases: list[ConversationCase]) -> dict[str, obje
     categories: dict[str, dict[str, int]] = {}
     durations: list[float] = []
     for case in cases:
-        repository = PropertyRepository()
+        repository = PropertyRepository(demo_properties())
         agent = EstateAgent(repository)
         turns = []
         for number, turn in enumerate(case.turns, 1):

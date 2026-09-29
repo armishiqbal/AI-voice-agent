@@ -4,14 +4,30 @@ from uuid import uuid4
 import pytest
 
 from app.agents.graph import EstateAgent
+from app.domain.fixtures import demo_properties
 from app.domain.models import AgentDecision, AppointmentRequest, PropertyQuery
 from app.integrations.rag.pinecone import RetrievedChunk
 from app.services.appointments import (
     AppointmentService,
-    PropertyRepository,
     redact_for_retention,
 )
+from app.services.appointments import (
+    PropertyRepository as EmptyByDefaultPropertyRepository,
+)
 from app.services.retrieval import GroundedRetriever, rank_properties
+
+
+class PropertyRepository(EmptyByDefaultPropertyRepository):
+    """Explicit synthetic inventory for tests that exercise recommendations."""
+
+    def __init__(self) -> None:
+        super().__init__(demo_properties())
+
+
+def test_in_memory_property_repository_does_not_seed_sample_inventory() -> None:
+    repository = EmptyByDefaultPropertyRepository()
+    assert repository.list() == []
+    assert repository.get_available("PROP-001") is None
 
 
 def test_recommends_available_sale_property():
@@ -41,6 +57,42 @@ def test_listing_search_is_not_misclassified_as_a_seller_lead(
     expected_intent: str,
 ) -> None:
     assert EstateAgent._intent(utterance).value == expected_intent
+
+
+@pytest.mark.parametrize(
+    ("utterance", "expected_intent"),
+    [
+        (
+            "As a first-time home buyer, what checks should I make before deciding to visit a property?",
+            "buy",
+        ),
+        ("How does the appointment process work?", "unknown"),
+        ("I want to book an appointment.", "book"),
+        ("Can we schedule a site visit?", "book"),
+        ("Property visit schedule kar dein.", "book"),
+        ("Ayesha ke saath booking karni hai.", "book"),
+        ("booking chahiye", "book"),
+        ("Visit karni hai.", "book"),
+        ("Mujhe property dekhne jana hai.", "book"),
+    ],
+)
+def test_booking_intent_requires_a_clear_visit_request(
+    utterance: str,
+    expected_intent: str,
+) -> None:
+    assert EstateAgent._intent(utterance).value == expected_intent
+
+
+def test_general_visit_advice_does_not_enter_booking_flow() -> None:
+    agent = EstateAgent(PropertyRepository())
+    decision = agent.respond(
+        "general-visit-advice",
+        "As a first-time home buyer, what checks should I make before deciding to visit a property?",
+    )
+
+    assert decision.kind == "answer"
+    assert "availability" in decision.spoken_text.casefold()
+    assert agent.states["general-visit-advice"].appointment_status is None
 
 
 def test_rental_with_listing_word_does_not_trigger_seller_handoff() -> None:

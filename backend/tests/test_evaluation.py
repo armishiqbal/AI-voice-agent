@@ -2,6 +2,7 @@ from pathlib import Path
 
 from app.agents.graph import EstateAgent
 from app.core.observability import TraceStore
+from app.domain.fixtures import demo_properties
 from app.evaluation.runner import load_cases, run_evaluation
 from app.services.appointments import PropertyRepository
 
@@ -9,7 +10,7 @@ from app.services.appointments import PropertyRepository
 def test_fixture_evaluation_reports_results() -> None:
     root = Path(__file__).resolve().parents[2]
     report = run_evaluation(
-        lambda: EstateAgent(PropertyRepository()),
+        lambda: EstateAgent(PropertyRepository(demo_properties())),
         load_cases(root / "evals" / "conversations.json"),
     )
     assert report.total >= 5

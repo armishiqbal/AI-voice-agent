@@ -7,9 +7,24 @@ import {
   resolveVoiceNotReadyMessage,
   resolveVoiceConnectionStatus,
   parseRuntimeReadiness,
+  parseStructuredReasoningStatus,
   shouldApplyServerVoicePhase,
   shouldOfferVoiceRetry,
 } from "../src/voiceUiState.mjs";
+
+test("reasoning status from text turns and voice events is validated and sanitized", () => {
+  assert.deepEqual(parseStructuredReasoningStatus({
+    reasoning_status: "provider_error",
+    reasoning_failure_category: "rate_limited",
+    raw_error: "must not surface",
+  }), { status: "provider_error", failureCategory: "rate_limited" });
+  assert.deepEqual(parseStructuredReasoningStatus({
+    status: "cooldown",
+    last_failure_category: "timeout",
+    api_key: "must not surface",
+  }), { status: "cooldown", failureCategory: "timeout" });
+  assert.equal(parseStructuredReasoningStatus({ status: "healthy", failure_category: "other" }), null);
+});
 
 test("runtime readiness exposes only validated provider, route, and blocker details", () => {
   assert.deepEqual(parseRuntimeReadiness({
@@ -47,6 +62,7 @@ test("a microphone failure remains visible when the server reports listening", (
 
 test("healthy live listening keeps the connected state", () => {
   assert.equal(resolveDisplayedVoicePhase("listening", null, false, true), "listening");
+  assert.equal(resolveDisplayedVoicePhase("transcribing", null, false, true), "transcribing");
   assert.equal(shouldApplyServerVoicePhase("listening", null, true), true);
   assert.deepEqual(resolveVoiceConnectionStatus(true, true, null, true), {
     tone: "live",

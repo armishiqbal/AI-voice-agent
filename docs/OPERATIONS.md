@@ -30,7 +30,8 @@ provider sample started audio at 1,168 ms in balanced mode versus 3,462 ms with 
 undocumented `low` value, which is directional evidence only. `/readyz` performs and caches an
 OpenAI Realtime session handshake for 30 seconds; the
 other routes report configured/dependency readiness. OpenAI structured decisions make one bounded
-attempt and use the deterministic graph fallback during a 30-second provider-failure cooldown.
+attempt and use the deterministic graph fallback during a provider-failure cooldown. Rate-limited
+responses honor `Retry-After` (bounded to 1–300 seconds); other failures use the 30-second default.
 `/readyz.structured_reasoning` reports the cooldown and retains a sanitized last failure category
 after the cooldown until a model request succeeds. A previous provider failure marks overall
 readiness degraded without blocking the configured hybrid voice route. The status does not verify all provider balances or
@@ -159,8 +160,7 @@ Outside development, startup fails closed unless `DATABASE_URL` is PostgreSQL an
   begins, the longer TTS idle timeout applies. TTS stream duration is recorded on completion,
   provider error, and cancellation once synthesis has begun. Treat P95 values as unavailable until
   a representative live run has data.
-- `python scripts/evaluation/release_report.py` prints the current local safety/grounding/retrieval gates and marks
-  missing provider credentials or OAuth as `blocked by prerequisite`.
+- `python scripts/evaluation/release_report.py` prints local safety/grounding/retrieval gates and the provider configuration visible to that process. Add `--api-url http://127.0.0.1:8000` to also query the running app's `/readyz`; the report keeps those two environments separate and marks missing provider credentials or OAuth as `blocked by prerequisite`.
 
 ## Security controls
 

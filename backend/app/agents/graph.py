@@ -235,7 +235,36 @@ class EstateAgent:
             return Intent.CANCEL
         if any(word in value for word in ("reschedule", "change time", "time change", "waqt badalna", "doosra time")):
             return Intent.RESCHEDULE
-        if any(word in value for word in ("book", "visit", "appointment", "booking", "dekhna", "dekhne jana", "visit karna", "ayesha ke saath")):
+        explicit_visit_request = any(
+            phrase in value
+            for phrase in (
+                "visit karna hai",
+                "visit karni hai",
+                "visit book kar",
+                "site visit karna",
+                "site visit karni",
+                "appointment book kar",
+                "appointment schedule kar",
+                "appointment chahiye",
+                "booking chahiye",
+                "booking karni hai",
+                "booking karna hai",
+                "booking kar dein",
+                "property dekhne jana",
+                "ghar dekhne jana",
+            )
+        ) or any(
+            re.search(pattern, value)
+            for pattern in (
+                r"\b(?:book|schedule|arrange|request|set up)\s+(?:a\s+|an\s+|the\s+)?(?:property\s+|site\s+)?(?:visit|viewing|appointment)\b",
+                r"\b(?:property|site)\s+(?:visit|viewing)\s+(?:book|schedule|arrange)\b",
+                r"\b(?:i want|i would like|i'd like|i need|can i|could i|let's|please)\s+(?:to\s+)?(?:visit|view|see)\b",
+                r"\b(?:i want|i would like|i'd like|i need)\s+(?:a\s+|an\s+|the\s+)?(?:property\s+)?(?:visit|viewing|appointment)\b",
+                r"\b(?:book|schedule|arrange|request)\b.{0,32}\b(?:visit|viewing|appointment)\b",
+                r"\b(?:book|schedule)\s+(?:it|that|this)\b",
+            )
+        )
+        if explicit_visit_request:
             return Intent.BOOK
         # A listing is an object being searched for; it does not imply that the caller
         # wants to sell. Require an explicit seller action to avoid routing buyer/renter
@@ -610,6 +639,11 @@ class EstateAgent:
             "overview",
             "market update",
             "market briefing",
+            "first-time buyer",
+            "first time buyer",
+            "before deciding to visit",
+            "what checks should i make",
+            "what should i check before",
         )
         is_advice_query = any(marker in lowered for marker in advice_markers)
         if not is_advice_query:
@@ -786,6 +820,30 @@ class EstateAgent:
                 candidate = self._provider_decision(prompt, text)
                 if candidate is not None and candidate.kind in ("answer", "ask_clarification") and not candidate.property_ids and not candidate.source_ids:
                     return self._finish(conversation_id, state, candidate)
+            if any(
+                marker in lowered
+                for marker in (
+                    "first-time buyer",
+                    "first time buyer",
+                    "before deciding to visit",
+                    "what checks should i make",
+                    "what should i check before",
+                )
+            ):
+                spoken_text = (
+                    "جانے سے پہلے مکمل قیمت، ادائیگی کی شرائط اور موجودہ دستیابی کمپنی کے ریکارڈ سے چیک کریں۔ "
+                    "وزٹ پر اپنے سوالات کی فہرست ساتھ رکھیں۔"
+                    if language == "ur-Arab"
+                    else "Visit se pehle total price, payment terms, aur current availability company records se check karein. "
+                    "Visit par apne questions ki list saath rakhein."
+                    if language == "ur-Latn"
+                    else "Before visiting, compare the full price and payment terms, confirm current availability from company records, and bring your questions for the viewing."
+                )
+                return self._finish(
+                    conversation_id,
+                    state,
+                    AgentDecision(kind="answer", spoken_text=spoken_text),
+                )
         if state.intent == Intent.UNKNOWN and any(
             value is not None
             for value in (

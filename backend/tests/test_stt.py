@@ -6,6 +6,7 @@ import pytest
 
 from app.integrations.stt import (
     STTEvent,
+    estimated_transcript_lag_ms,
     parse_deepgram_message,
     parse_openai_transcription_event,
     resample_pcm16_16k_to_24k,
@@ -17,6 +18,8 @@ def test_parse_deepgram_final_result() -> None:
     event = parse_deepgram_message(
         {
             "type": "Results",
+            "start": 0.25,
+            "duration": 1.4,
             "is_final": True,
             "speech_final": True,
             "channel": {
@@ -34,9 +37,32 @@ def test_parse_deepgram_final_result() -> None:
         text="Mujhe Karachi mein ghar chahiye",
         language="ur",
         confidence=0.91,
+        audio_start_seconds=0.25,
+        audio_duration_seconds=1.4,
         is_final=True,
         speech_final=True,
     )
+
+
+def test_parse_deepgram_audio_cursor_metadata_is_nullable_and_finite() -> None:
+    event = parse_deepgram_message(
+        {
+            "type": "Results",
+            "start": "0.5",
+            "duration": float("nan"),
+            "channel": {"alternatives": [{"transcript": "Karachi"}]},
+        }
+    )
+    assert event is not None
+    assert event.audio_start_seconds == 0.5
+    assert event.audio_duration_seconds is None
+
+
+def test_estimated_transcript_lag_uses_processed_audio_cursor_and_skips_invalid_offsets() -> None:
+    event = STTEvent(audio_start_seconds=0.5, audio_duration_seconds=1.25)
+    assert estimated_transcript_lag_ms(2.0, event) == 250.0
+    assert estimated_transcript_lag_ms(1.0, event) is None
+    assert estimated_transcript_lag_ms(2.0, STTEvent()) is None
 
 
 def test_parse_deepgram_explicit_finalize_without_endpointing() -> None:

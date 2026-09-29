@@ -104,6 +104,53 @@ def test_structured_decision_provider_retains_sanitized_rate_limit_failure() -> 
         provider._request_executor.shutdown(wait=True)
 
 
+def test_structured_decision_provider_honors_bounded_rate_limit_retry_after(monkeypatch) -> None:
+    class RateLimitedCompletions:
+        def parse(self, **kwargs):
+            del kwargs
+            error = RuntimeError("provider details are not included in readiness")
+            error.status_code = 429
+            error.response = types.SimpleNamespace(headers={"retry-after": "12"})
+            raise error
+
+    class Client:
+        beta = types.SimpleNamespace(chat=types.SimpleNamespace(completions=RateLimitedCompletions()))
+
+    provider = OpenAIStructuredDecisionProvider.__new__(OpenAIStructuredDecisionProvider)
+    provider.client = Client()
+    provider.model = "synthetic"
+    provider.timeout_seconds = 0.5
+    provider._retry_after = 0.0
+    provider._last_failure_category = None
+    provider._request_lock = threading.Lock()
+    provider._request_future = None
+    provider._request_executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr("app.integrations.llm.time.monotonic", lambda: 100.0)
+
+    try:
+        with pytest.raises(LLMDecisionError):
+            provider.decide("system", "request")
+        assert provider.failure_cooldown_remaining == 12.0
+        assert provider.last_failure_category == "rate_limited"
+    finally:
+        provider._request_executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("retry_after", ["0", "9999", "invalid"])
+def test_rate_limit_retry_after_is_clamped_or_uses_default(retry_after: str) -> None:
+    error = RuntimeError("rate limited")
+    error.status_code = 429
+    error.response = types.SimpleNamespace(headers={"retry-after": retry_after})
+
+    delay = OpenAIStructuredDecisionProvider._failure_cooldown_seconds(error)
+
+    assert 1.0 <= delay <= 300.0
+    if retry_after == "invalid":
+        assert delay == OpenAIStructuredDecisionProvider.FAILURE_COOLDOWN_SECONDS
+    elif retry_after == "9999":
+        assert delay == 300.0
+
+
 def test_structured_decision_provider_enforces_wall_clock_deadline() -> None:
     release_request = threading.Event()
     calls = 0
@@ -136,6 +183,46 @@ def test_structured_decision_provider_enforces_wall_clock_deadline() -> None:
         with pytest.raises(LLMDecisionError, match="failure cooldown"):
             provider.decide("system", "must not start a second request")
         assert calls == 1
+    finally:
+        release_request.set()
+        provider._request_executor.shutdown(wait=True)
+
+
+def test_late_rate_limit_result_updates_failure_category_and_retry_delay() -> None:
+    release_request = threading.Event()
+
+    class LateRateLimitedCompletions:
+        def parse(self, **kwargs):
+            del kwargs
+            release_request.wait(timeout=1)
+            error = RuntimeError("provider details are not included in readiness")
+            error.status_code = 429
+            error.response = types.SimpleNamespace(headers={"retry-after-ms": "12000"})
+            raise error
+
+    class Client:
+        beta = types.SimpleNamespace(chat=types.SimpleNamespace(completions=LateRateLimitedCompletions()))
+
+    provider = OpenAIStructuredDecisionProvider.__new__(OpenAIStructuredDecisionProvider)
+    provider.client = Client()
+    provider.model = "synthetic"
+    provider.timeout_seconds = 0.03
+    provider._retry_after = 0.0
+    provider._last_failure_category = None
+    provider._request_lock = threading.Lock()
+    provider._request_future = None
+    provider._request_executor = ThreadPoolExecutor(max_workers=1)
+
+    try:
+        with pytest.raises(LLMDecisionError, match="wall-clock deadline"):
+            provider.decide("system", "slow rate-limited request")
+        assert provider.last_failure_category == "timeout"
+        release_request.set()
+        deadline = time.monotonic() + 1
+        while provider.last_failure_category != "rate_limited" and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert provider.last_failure_category == "rate_limited"
+        assert 11.0 <= provider.failure_cooldown_remaining <= 12.0
     finally:
         release_request.set()
         provider._request_executor.shutdown(wait=True)
