@@ -34,7 +34,7 @@ Appointment transaction → PostgreSQL outbox → python worker.py
 ## Remaining end-to-end execution plan (current baseline)
 
 This is the current acceptance baseline as of 2026-09-29; it does not claim production
-readiness. The latest full local checks report 360 backend tests passed and 5 skipped, 64 frontend
+readiness. The latest full local checks report 361 backend tests passed and 5 skipped, 64 frontend
 tests passed, a successful production build, and passing Ruff, compilation, and diff checks. Backend
 WebSocket tests now stub STT so configured local provider credentials cannot make unit tests open
 live provider sockets. Deterministic capstone fixtures remain local-only evidence.
