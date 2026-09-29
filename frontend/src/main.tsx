@@ -1890,7 +1890,7 @@ function App() {
               <label>Your Full Name</label>
               <input
                 aria-label="Your name"
-                placeholder="e.g. Haroon Shahid"
+                placeholder="e.g. Armish Iqbal"
                 value={appointmentForm.client_name}
                 onChange={(e) => setAppointmentForm({ ...appointmentForm, client_name: e.target.value })}
               />

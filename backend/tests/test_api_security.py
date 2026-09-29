@@ -929,6 +929,7 @@ def test_hybrid_voice_records_deepgram_audio_cursor_lag_from_websocket_audio(
     from app.integrations.stt import DeepgramStreamingSTT
 
     measurements: dict[str, list[float]] = {}
+    released_tickets: list[str] = []
 
     class CursorSTT(DeepgramStreamingSTT):
         def __init__(self) -> None:
@@ -972,6 +973,13 @@ def test_hybrid_voice_records_deepgram_audio_cursor_lag_from_websocket_audio(
         "observe",
         lambda name, value, limit=1000: measurements.setdefault(name, []).append(value),
     )
+    actual_release = api.voice_sessions.release
+
+    def record_release(ticket: str) -> None:
+        released_tickets.append(ticket)
+        actual_release(ticket)
+
+    monkeypatch.setattr(api.voice_sessions, "release", record_release)
     active_sessions_before = api.voice_sessions.capacity_snapshot()["active"]
     issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
     assert issued is not None
@@ -998,18 +1006,17 @@ def test_hybrid_voice_records_deepgram_audio_cursor_lag_from_websocket_audio(
             websocket.close()
 
         # Let the WebSocket disconnect handler run on the still-live app loop.
-        cleanup_deadline = monotonic() + 2
+        cleanup_deadline = monotonic() + 3
         while (
-            api.voice_sessions.capacity_snapshot()["active"] > active_sessions_before
+            issued[0] not in released_tickets
             and monotonic() < cleanup_deadline
         ):
             sleep(0.01)
 
     assert any(event.get("type") == "transcript" and event.get("is_final") for event in events)
     assert measurements["voice.stt_audio_cursor_lag_ms"] == [0.0]
-    # The dedicated capacity test below exercises server-side lease release.
-    # Close this test's persisted lease directly to avoid contaminating later tests.
-    api.voice_sessions.release(issued[0])
+    # Always remove a lease left by a failed server cleanup assertion.
+    assert issued[0] in released_tickets
     assert api.voice_sessions.capacity_snapshot()["active"] == active_sessions_before
 
 
