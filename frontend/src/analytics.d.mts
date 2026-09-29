@@ -34,3 +34,7 @@ export type AdminMetrics = {
 
 export function parseAdminMetrics(value: unknown): AdminMetrics | null;
 export function formatMetricName(value: string): string;
+export function providerPresentation(name: string, configured: boolean): {
+  label: string;
+  className: "configured" | "unavailable";
+};

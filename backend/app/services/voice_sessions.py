@@ -174,6 +174,120 @@ class VoiceSessionService:
         mode, separator, _secret = raw_token.partition(".")
         return mode if separator and mode in {"standard", "openai", "hybrid"} else None
 
+    @staticmethod
+    def _external_lease_hash(lease_id: str) -> str:
+        return hashlib.sha256(f"external:{lease_id}".encode()).hexdigest()
+
+    def acquire_external_lease(self, lease_id: str, client_identity: str) -> bool:
+        """Reserve shared voice capacity for a signed external call such as Twilio."""
+        if not lease_id or len(lease_id) > 256 or not client_identity or len(client_identity) > 256:
+            return False
+        now = datetime.now(UTC)
+        token_hash = self._external_lease_hash(lease_id)
+        fingerprint = self._fingerprint(client_identity)
+        with self._session_factory() as session:
+            self._lock_scopes(session, {"global", f"client:{fingerprint}"}, now)
+            session.execute(
+                delete(VoiceSessionLeaseRecord).where(VoiceSessionLeaseRecord.expires_at <= now)
+            )
+            existing = session.scalar(
+                select(VoiceSessionLeaseRecord).where(
+                    VoiceSessionLeaseRecord.token_hash == token_hash,
+                    VoiceSessionLeaseRecord.expires_at > now,
+                )
+            )
+            if existing is not None:
+                session.commit()
+                return existing.client_fingerprint == fingerprint
+            active_total = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(VoiceSessionLeaseRecord)
+                    .where(VoiceSessionLeaseRecord.expires_at > now)
+                )
+                or 0
+            )
+            active_for_client = int(
+                session.scalar(
+                    select(func.count())
+                    .select_from(VoiceSessionLeaseRecord)
+                    .where(
+                        VoiceSessionLeaseRecord.client_fingerprint == fingerprint,
+                        VoiceSessionLeaseRecord.expires_at > now,
+                    )
+                )
+                or 0
+            )
+            if (
+                active_total >= self._max_active_total
+                or active_for_client >= self._max_active_per_client
+            ):
+                session.commit()
+                return False
+            session.add(
+                VoiceSessionLeaseRecord(
+                    token_hash=token_hash,
+                    client_fingerprint=fingerprint,
+                    created_at=now,
+                    expires_at=now + self._lease_lifetime,
+                )
+            )
+            session.commit()
+            return True
+
+    def renew_external_lease(self, lease_id: str) -> bool:
+        """Renew an active external call lease; expired or released calls cannot revive it."""
+        if not lease_id or len(lease_id) > 256:
+            return False
+        token_hash = self._external_lease_hash(lease_id)
+        now = datetime.now(UTC)
+        with self._session_factory() as session:
+            fingerprint = session.scalar(
+                select(VoiceSessionLeaseRecord.client_fingerprint).where(
+                    VoiceSessionLeaseRecord.token_hash == token_hash,
+                    VoiceSessionLeaseRecord.expires_at > now,
+                )
+            )
+            if not fingerprint:
+                return False
+            session.rollback()
+            self._lock_scopes(session, {"global", f"client:{fingerprint}"}, now)
+            result = session.execute(
+                update(VoiceSessionLeaseRecord)
+                .where(
+                    VoiceSessionLeaseRecord.token_hash == token_hash,
+                    VoiceSessionLeaseRecord.client_fingerprint == fingerprint,
+                    VoiceSessionLeaseRecord.expires_at > now,
+                )
+                .values(expires_at=now + self._lease_lifetime)
+            )
+            session.commit()
+            return result.rowcount == 1
+
+    def release_external_lease(self, lease_id: str) -> None:
+        """Release shared capacity when an external call stops or disconnects."""
+        if not lease_id or len(lease_id) > 256:
+            return
+        token_hash = self._external_lease_hash(lease_id)
+        with self._session_factory() as session:
+            fingerprint = session.scalar(
+                select(VoiceSessionLeaseRecord.client_fingerprint).where(
+                    VoiceSessionLeaseRecord.token_hash == token_hash
+                )
+            )
+            if not fingerprint:
+                return
+            session.rollback()
+            now = datetime.now(UTC)
+            self._lock_scopes(session, {"global", f"client:{fingerprint}"}, now)
+            session.execute(
+                delete(VoiceSessionLeaseRecord).where(
+                    VoiceSessionLeaseRecord.token_hash == token_hash,
+                    VoiceSessionLeaseRecord.client_fingerprint == fingerprint,
+                )
+            )
+            session.commit()
+
     def consume(
         self, raw_token: str, client_address: str, origin: str
     ) -> VoiceSessionConsumeResult:

@@ -12,6 +12,8 @@ The existing LangGraph and SQL service own **Call → Intent → Property Match 
 6. Configure Google OAuth (`GOOGLE_TOKEN_PATH`, `GOOGLE_CALENDAR_ID`, `GMAIL_SENDER`) and an operator-managed employee directory, for example `EMPLOYEE_EMAIL_DIRECTORY='{"Ayesha Khan":"ayesha@your-company.example"}'`. Use real employee addresses locally; none are shipped. The Gmail-enabled booking service refuses bookings until the directory is available; it never guesses a recipient.
 7. Activate the workflow and run `python worker.py` separately from `python run.py`.
 
+When the backend has both Google Calendar OAuth and an n8n appointment sink configured, `GMAIL_SENDER` is required at startup. The appointment workflow requires confirmed Calendar and employee-email receipts before updating CRM; an incomplete pipeline is rejected instead of retrying every appointment until exhaustion. n8n-only CRM delivery for leads, follow-ups, and call outcomes remains supported without Google configuration.
+
 No call, email or CRM mutation is performed merely by importing this file. Google OAuth authorization, provider access, CRM adapter credentials, n8n runtime import and actual integration delivery remain operator live checks; this export has structural and transport tests, not an invented n8n execution result.
 
 ## Data and failure contract

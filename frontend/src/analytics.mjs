@@ -108,3 +108,15 @@ export function formatMetricName(value) {
     .map((word) => acronyms[word.toLowerCase()] ?? word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
 }
+
+export function providerPresentation(name, configured) {
+  const isVoiceRoute = name.endsWith("_voice_ready") || name === "live_voice_pipeline_ready";
+  if (isVoiceRoute) {
+    return configured
+      ? { label: "Configured · verify on call", className: "configured" }
+      : { label: "Route unavailable", className: "unavailable" };
+  }
+  return configured
+    ? { label: "Credentials detected", className: "configured" }
+    : { label: "Not configured", className: "unavailable" };
+}

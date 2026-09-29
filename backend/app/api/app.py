@@ -92,7 +92,10 @@ from app.services.voice_acknowledgement import (
     prepare_acknowledgement,
 )
 from app.services.voice_booking import VoiceBookingFlow
-from app.services.voice_recovery import transcription_recovery_prompt
+from app.services.voice_recovery import (
+    telephony_provider_failure_prompt,
+    transcription_recovery_prompt,
+)
 from app.services.voice_sessions import VoiceSessionConsumeResult, VoiceSessionService
 from app.services.voice_stream import pipeline_synthesize_clauses
 
@@ -119,6 +122,19 @@ voice_sessions = VoiceSessionService(
     lease_lifetime=timedelta(seconds=settings.voice_session_lease_seconds),
 )
 STT_FINAL_SEGMENT_QUIET_SECONDS = 0.25
+STT_RECOVERABLE_FAILURES = frozenset(
+    {
+        "stt_stream_ended",
+        "stt_finalize_timeout",
+        "stt_provider_timeout",
+        "stt_provider_error",
+    }
+)
+
+
+def _stt_failure_is_recoverable(reason: str) -> bool:
+    """Only auto-restart known transient failures; unknown and permanent errors stop."""
+    return reason in STT_RECOVERABLE_FAILURES
 
 
 def _is_turn_final(voice_mode: str, event: STTEvent, browser_committed: bool) -> bool:
@@ -702,6 +718,13 @@ def _parse_form_body(body: bytes) -> dict[str, str]:
     return {key: values[-1] for key, values in parsed.items() if values}
 
 
+TWILIO_CAPACITY_REJECTION_TWIML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<Response><Say>Please call us back shortly. Our team is helping other callers.</Say>'
+    "<Hangup/></Response>"
+)
+
+
 @app.post("/v1/telephony/calls", dependencies=[Depends(require_admin_api_key)])
 async def start_telephony_call(request: TelephonyCallRequest) -> dict[str, str]:
     try:
@@ -729,10 +752,18 @@ async def telephony_inbound(request: Request) -> Response:
         settings.twilio_auth_token,
     ):
         raise HTTPException(status_code=401, detail="Invalid telephony signature")
+    call_sid = params.get("CallSid", "").strip()
+    caller = params.get("From", "").strip()
+    if not call_sid or not caller:
+        raise HTTPException(status_code=400, detail="Twilio call identity is required")
     try:
         twiml = telephony.inbound_twiml()
     except TelephonyProviderError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+    lease_id = f"twilio:{call_sid}"
+    if not await asyncio.to_thread(voice_sessions.acquire_external_lease, lease_id, caller):
+        traces.increment("voice:telephony_capacity_rejected")
+        return Response(content=TWILIO_CAPACITY_REJECTION_TWIML, media_type="application/xml")
     return Response(content=twiml, media_type="application/xml")
 
 
@@ -1005,7 +1036,7 @@ async def voice_socket(websocket: WebSocket):
     async def release_session_lease() -> None:
         if not lease_task.done():
             lease_task.cancel()
-        await asyncio.gather(lease_task, return_exceptions=True)
+        lease_task.add_done_callback(_consume_background_task_result)
         await asyncio.to_thread(voice_sessions.release, voice_ticket)
 
     conversation_id = str(uuid4())
@@ -1840,7 +1871,8 @@ async def voice_socket(websocket: WebSocket):
                 stt_turn_active = False
                 await websocket.send_json({
                     "type": "stt_unavailable", "reason": failure_reason,
-                    "recoverable": True, "restart_required": True,
+                    "recoverable": _stt_failure_is_recoverable(failure_reason),
+                    "restart_required": True,
                 })
 
     async def start_stt_stream() -> bool:
@@ -1920,6 +1952,7 @@ async def voice_socket(websocket: WebSocket):
         while True:
             message = await websocket.receive()
             if message.get("type") == "websocket.disconnect":
+                traces.increment("voice:websocket_disconnect_received")
                 break
             if message.get("bytes") is not None:
                 if not stt_available:
@@ -1937,7 +1970,7 @@ async def voice_socket(websocket: WebSocket):
                                 {
                                     "type": "stt_unavailable",
                                     "reason": stt_transport_failure_reason,
-                                    "recoverable": True,
+                                    "recoverable": _stt_failure_is_recoverable(stt_transport_failure_reason),
                                     "restart_required": True,
                                 }
                             )
@@ -2039,7 +2072,7 @@ async def voice_socket(websocket: WebSocket):
                         {
                             "type": "stt_unavailable",
                             "reason": stt_transport_failure_reason,
-                            "recoverable": True,
+                            "recoverable": _stt_failure_is_recoverable(stt_transport_failure_reason),
                             "restart_required": True,
                         }
                     )
@@ -2080,7 +2113,7 @@ async def voice_socket(websocket: WebSocket):
                             {
                                 "type": "stt_unavailable",
                                 "reason": stt_transport_failure_reason,
-                                "recoverable": True,
+                                "recoverable": _stt_failure_is_recoverable(stt_transport_failure_reason),
                                 "restart_required": True,
                             }
                         )
@@ -2242,7 +2275,7 @@ async def voice_socket(websocket: WebSocket):
                     (time.perf_counter() - cancel_started) * 1000,
                 )
     except WebSocketDisconnect:
-        pass
+        traces.increment("voice:websocket_disconnect_received")
     finally:
         try:
             if stt_task is not None and not stt_task.done() and audio_queue is not None:
@@ -2250,10 +2283,6 @@ async def voice_socket(websocket: WebSocket):
                     audio_queue.put_nowait(None)
                 except asyncio.QueueFull:
                     pass
-                try:
-                    await asyncio.wait_for(stt_task, timeout=0.25)
-                except TimeoutError:
-                    stt_task.cancel()
 
             pending_tasks = list(turn_tasks)
             if stt_task is not None:
@@ -2261,15 +2290,7 @@ async def voice_socket(websocket: WebSocket):
             for task in pending_tasks:
                 if not task.done():
                     task.cancel()
-            if pending_tasks:
-                done, still_running = await asyncio.wait(pending_tasks, timeout=1.0)
-                if done:
-                    await asyncio.gather(*done, return_exceptions=True)
-                if still_running:
-                    traces.increment("voice:shutdown_task_timeout", len(still_running))
-                    for task in still_running:
-                        task.cancel()
-                        task.add_done_callback(_consume_background_task_result)
+                    task.add_done_callback(_consume_background_task_result)
 
             warmup_tasks = [
                 task
@@ -2279,15 +2300,7 @@ async def voice_socket(websocket: WebSocket):
             for task in warmup_tasks:
                 if not task.done():
                     task.cancel()
-            if warmup_tasks:
-                done, still_running = await asyncio.wait(warmup_tasks, timeout=1.0)
-                if done:
-                    await asyncio.gather(*done, return_exceptions=True)
-                if still_running:
-                    traces.increment("voice:shutdown_warmup_timeout", len(still_running))
-                    for task in still_running:
-                        task.cancel()
-                        task.add_done_callback(_consume_background_task_result)
+                    task.add_done_callback(_consume_background_task_result)
 
             providers_to_close = []
             if session_realtime_tts is not None:
@@ -2295,20 +2308,30 @@ async def voice_socket(websocket: WebSocket):
             if isinstance(session_stt, OpenAIRealtimeSTT):
                 providers_to_close.append(("stt", session_stt))
             for provider_name, provider in providers_to_close:
-                try:
-                    await asyncio.wait_for(provider.aclose(), timeout=1.0)
-                except Exception:  # noqa: BLE001 - cleanup must not retain a voice lease
-                    traces.increment(f"voice:{provider_name}_cleanup_timeout")
+                async def close_provider(provider_name: str = provider_name, provider: object = provider) -> None:
+                    try:
+                        await asyncio.wait_for(provider.aclose(), timeout=1.0)
+                    except TimeoutError:
+                        traces.increment(f"voice:{provider_name}_cleanup_timeout")
+                    except Exception:  # noqa: BLE001 - provider close failure must not retain the call lease
+                        traces.increment(f"voice:{provider_name}_cleanup_failed")
 
+                close_task = asyncio.create_task(close_provider())
+                close_task.add_done_callback(_consume_background_task_result)
             try:
-                await asyncio.to_thread(
-                    record_voice_call_outcome,
-                    conversation_id=conversation_id,
-                    channel="browser",
-                    duration_ms=max(0, int((time.perf_counter() - voice_call_started_at) * 1000)),
-                    state=agent.states.get(conversation_id),
-                    appointment_reference=appointment_reference,
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        record_voice_call_outcome,
+                        conversation_id=conversation_id,
+                        channel="browser",
+                        duration_ms=max(0, int((time.perf_counter() - voice_call_started_at) * 1000)),
+                        state=agent.states.get(conversation_id),
+                        appointment_reference=appointment_reference,
+                    ),
+                    timeout=1.0,
                 )
+            except TimeoutError:
+                traces.increment("voice.call_outcome_persist_timeout")
             except Exception:  # noqa: BLE001 - record failure is observable without leaking caller data
                 traces.increment("voice.call_outcome_persist_failure")
         finally:
@@ -2336,10 +2359,39 @@ async def telephony_media_socket(websocket: WebSocket) -> None:
     await websocket.accept()
     conversation_id = str(uuid4())
     stream_sid: str | None = None
-    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=100)
     active_task: asyncio.Task[None] | None = None
     stt_task: asyncio.Task[None] | None = None
+    lease_renewal_task: asyncio.Task[None] | None = None
+    telephony_lease_id: str | None = None
     telephony_call_started_at: float | None = None
+    telephony_language = "ur-Latn"
+    call_termination = asyncio.Event()
+    call_termination_code = 1011
+    call_termination_reason = "Call processing failed"
+    receive_task: asyncio.Task[str] | None = None
+    termination_wait_task: asyncio.Task[bool] | None = None
+
+    def request_call_termination(code: int, reason: str) -> None:
+        nonlocal call_termination_code, call_termination_reason
+        call_termination_code = code
+        call_termination_reason = reason
+        call_termination.set()
+
+    async def renew_telephony_lease() -> None:
+        interval = max(5.0, min(30.0, settings.voice_session_lease_seconds / 3))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                renewed = telephony_lease_id is not None and await asyncio.to_thread(
+                    voice_sessions.renew_external_lease, telephony_lease_id
+                )
+            except Exception:  # noqa: BLE001 - fail closed when shared call capacity is unavailable
+                renewed = False
+            if not renewed:
+                traces.increment("voice:telephony_lease_lost")
+                request_call_termination(1013, "Telephony call capacity lease expired")
+                return
 
     async def audio_stream() -> AsyncIterator[bytes]:
         while True:
@@ -2351,6 +2403,62 @@ async def telephony_media_socket(websocket: WebSocket) -> None:
     async def send_clear() -> None:
         if stream_sid:
             await websocket.send_json({"event": "clear", "streamSid": stream_sid})
+
+    async def stream_spoken_text(
+        text: str, language: str, turn_received_at: float | None = None
+    ) -> None:
+        if not stream_sid:
+            return
+        tts_started_at = time.perf_counter()
+        first_audio_recorded = False
+        end_to_first_audio_recorded = False
+        try:
+            async for chunk in tts.synthesize_stream(text, language):
+                if chunk.encoding != "pcm_s16le" or not chunk.audio:
+                    raise TTSProviderError("Twilio media bridge requires PCM16 TTS output")
+                if not first_audio_recorded:
+                    traces.observe(
+                        "voice.tts_first_audio_latency_ms",
+                        (time.perf_counter() - tts_started_at) * 1000,
+                    )
+                    first_audio_recorded = True
+                pcm8 = resample_pcm16(chunk.audio, chunk.sample_rate, 8_000)
+                await websocket.send_json(
+                    {
+                        "event": "media",
+                        "streamSid": stream_sid,
+                        "media": {
+                            "payload": base64.b64encode(pcm16_to_mulaw(pcm8)).decode("ascii")
+                        },
+                    }
+                )
+                if turn_received_at is not None and not end_to_first_audio_recorded:
+                    traces.observe(
+                        "voice.final_transcript_to_first_audio_ms",
+                        (time.perf_counter() - turn_received_at) * 1000,
+                    )
+                    end_to_first_audio_recorded = True
+        finally:
+            traces.observe(
+                "voice.tts_stream_duration_ms",
+                (time.perf_counter() - tts_started_at) * 1000,
+            )
+
+    async def speak_recovery(text: str, language: str) -> None:
+        try:
+            try:
+                await asyncio.to_thread(transcripts.append, conversation_id, "assistant", text)
+            except Exception:  # noqa: BLE001 - preserve caller audio when transcript storage fails
+                traces.increment("voice:telephony_recovery_transcript_failure")
+            await stream_spoken_text(text, language)
+        except TTSProviderError:
+            traces.increment("provider_failure:telephony_tts")
+            request_call_termination(1011, "Speech output unavailable")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - recovery must not hide provider failures
+            traces.increment("provider_failure:telephony_recovery")
+            request_call_termination(1011, "Call recovery failed")
 
     async def process_turn(text: str, language: str, turn_received_at: float | None) -> None:
         started = time.perf_counter()
@@ -2364,87 +2472,132 @@ async def telephony_media_socket(websocket: WebSocket) -> None:
                 return
             decision_completed_at = time.perf_counter()
             traces.observe("voice.decision_latency_ms", (decision_completed_at - started) * 1000)
-            tts_started_at = decision_completed_at
-            first_audio_recorded = False
-            end_to_first_audio_recorded = False
-            try:
-                async for chunk in tts.synthesize_stream(decision.spoken_text, language):
-                    if chunk.encoding != "pcm_s16le" or not chunk.audio:
-                        raise TTSProviderError("Twilio media bridge requires PCM16 TTS output")
-                    if not first_audio_recorded:
-                        traces.observe(
-                            "voice.tts_first_audio_latency_ms",
-                            (time.perf_counter() - tts_started_at) * 1000,
-                        )
-                        first_audio_recorded = True
-                    pcm8 = resample_pcm16(chunk.audio, chunk.sample_rate, 8_000)
-                    await websocket.send_json(
-                        {
-                            "event": "media",
-                            "streamSid": stream_sid,
-                            "media": {
-                                "payload": base64.b64encode(pcm16_to_mulaw(pcm8)).decode("ascii")
-                            },
-                        }
-                    )
-                    if turn_received_at is not None and not end_to_first_audio_recorded:
-                        traces.observe(
-                            "voice.final_transcript_to_first_audio_ms",
-                            (time.perf_counter() - turn_received_at) * 1000,
-                        )
-                        end_to_first_audio_recorded = True
-            finally:
-                traces.observe(
-                    "voice.tts_stream_duration_ms",
-                    (time.perf_counter() - tts_started_at) * 1000,
-                )
-        except TTSProviderError as error:
+            await stream_spoken_text(decision.spoken_text, language, turn_received_at)
+        except TTSProviderError:
             traces.increment("provider_failure:telephony_tts")
-            await websocket.send_json({"event": "telephony_error", "reason": str(error)})
+            request_call_termination(1011, "Speech output unavailable")
         except Exception:  # noqa: BLE001 - carrier sessions fail closed
             traces.increment("provider_failure:telephony_agent")
+            await speak_recovery(
+                telephony_provider_failure_prompt(language), language
+            )
+            request_call_termination(1011, "Agent processing unavailable")
 
     async def consume_stt() -> None:
-        nonlocal active_task
-        try:
-            async for event in stt.stream(audio_stream()):
-                if event.speech_started:
-                    if active_task is not None and not active_task.done():
-                        active_task.cancel()
-                    await send_clear()
-                if event.is_final and event.speech_final and event.text:
-                    if (
-                        event.confidence is not None
-                        and event.confidence < settings.stt_min_confidence
-                    ):
-                        traces.increment("stt:low_confidence")
-                        continue
-                    if active_task is not None and not active_task.done():
-                        active_task.cancel()
-                    turn_received_at = time.perf_counter()
-                    active_task = asyncio.create_task(
-                        process_turn(
-                            event.text,
-                            normalize_voice_language(event.language),
-                            turn_received_at,
+        nonlocal active_task, telephony_language
+        restarts = 0
+        while True:
+            failure_reason: str | None = None
+            try:
+                async for event in stt.stream(audio_stream()):
+                    if event.speech_started:
+                        if active_task is not None and not active_task.done():
+                            active_task.cancel()
+                        await send_clear()
+                    if event.is_final and event.speech_final and event.text:
+                        telephony_language = normalize_voice_language(event.language)
+                        if (
+                            event.confidence is not None
+                            and event.confidence < settings.stt_min_confidence
+                        ):
+                            traces.increment("stt:low_confidence")
+                            if active_task is not None and not active_task.done():
+                                active_task.cancel()
+                                await send_clear()
+                            recovery = transcription_recovery_prompt(telephony_language)
+                            if recovery:
+                                active_task = asyncio.create_task(
+                                    speak_recovery(recovery, telephony_language)
+                                )
+                            continue
+                        restarts = 0
+                        if active_task is not None and not active_task.done():
+                            active_task.cancel()
+                        turn_received_at = time.perf_counter()
+                        active_task = asyncio.create_task(
+                            process_turn(event.text, telephony_language, turn_received_at)
                         )
-                    )
-        except STTProviderError:
+                failure_reason = "stt_stream_ended"
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - convert failures to safe caller guidance
+                code = stt_provider_error_code(error)
+                failure_reason = (
+                    f"stt_{code}" if code != "provider_unavailable" else "stt_provider_error"
+                )
+
             traces.increment("provider_failure:telephony_stt")
-        except asyncio.CancelledError:
-            raise
+            traces.increment(f"provider_failure:telephony_stt:{failure_reason}")
+            if _stt_failure_is_recoverable(failure_reason) and restarts < 2:
+                restarts += 1
+                traces.increment("voice:telephony_stt_auto_recovered")
+                recovery = transcription_recovery_prompt(telephony_language)
+                if recovery:
+                    if active_task is not None and not active_task.done():
+                        active_task.cancel()
+                    active_task = asyncio.create_task(
+                        speak_recovery(recovery, telephony_language)
+                    )
+                await asyncio.sleep(0.1 * restarts)
+                continue
+
+            if active_task is not None and not active_task.done():
+                active_task.cancel()
+            failure_prompt = telephony_provider_failure_prompt(telephony_language)
+            active_task = asyncio.create_task(speak_recovery(failure_prompt, telephony_language))
+            await active_task
+            request_call_termination(1011, "Speech recognition unavailable")
+            return
 
     try:
+        receive_task = asyncio.create_task(websocket.receive_text())
+        termination_wait_task = asyncio.create_task(call_termination.wait())
         while True:
-            message = await websocket.receive_text()
+            done, _pending = await asyncio.wait(
+                {receive_task, termination_wait_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if termination_wait_task in done:
+                try:
+                    await websocket.close(
+                        code=call_termination_code,
+                        reason=call_termination_reason,
+                    )
+                except RuntimeError:
+                    pass
+                break
+            message = receive_task.result()
+            receive_task = asyncio.create_task(websocket.receive_text())
             event = json.loads(message)
             event_type = event.get("event")
             if event_type == "start":
                 start = event.get("start") or {}
                 stream_sid = str(event.get("streamSid") or start.get("streamSid") or "")
-                call_sid = str(start.get("callSid") or conversation_id)
+                call_sid = str(start.get("callSid") or "").strip()
+                if not stream_sid or not call_sid:
+                    traces.increment("voice:telephony_invalid_start")
+                    await websocket.close(code=1008, reason="Invalid Twilio start event")
+                    break
+                candidate_lease_id = f"twilio:{call_sid}"
+                try:
+                    lease_active = await asyncio.to_thread(
+                        voice_sessions.renew_external_lease, candidate_lease_id
+                    )
+                except Exception:  # noqa: BLE001 - capacity must be available before using providers
+                    lease_active = False
+                if not lease_active:
+                    traces.increment("voice:telephony_unreserved_call")
+                    try:
+                        await websocket.close(
+                            code=1013, reason="Inbound call capacity reservation unavailable"
+                        )
+                    except RuntimeError:
+                        pass
+                    break
+                telephony_lease_id = candidate_lease_id
                 conversation_id = call_sid
                 telephony_call_started_at = time.perf_counter()
+                lease_renewal_task = asyncio.create_task(renew_telephony_lease())
                 stt_task = asyncio.create_task(consume_stt())
                 active_task = asyncio.create_task(
                     process_turn("Assalam-o-Alaikum", "ur-Latn", None)
@@ -2452,22 +2605,67 @@ async def telephony_media_socket(websocket: WebSocket) -> None:
             elif event_type == "media":
                 payload = (event.get("media") or {}).get("payload")
                 if payload:
-                    raw = base64.b64decode(payload)
+                    if not isinstance(payload, str) or len(payload) > 16_384:
+                        traces.increment("voice:telephony_invalid_media")
+                        await websocket.close(code=1009, reason="Telephony media frame is too large")
+                        break
+                    try:
+                        raw = base64.b64decode(payload, validate=True)
+                    except (ValueError, base64.binascii.Error):
+                        traces.increment("voice:telephony_invalid_media")
+                        await websocket.close(code=1003, reason="Invalid telephony media payload")
+                        break
                     pcm8 = mulaw_to_pcm16(raw)
-                    await audio_queue.put(resample_pcm16(pcm8, 8_000, settings.stt_sample_rate))
+                    try:
+                        audio_queue.put_nowait(
+                            resample_pcm16(pcm8, 8_000, settings.stt_sample_rate)
+                        )
+                    except asyncio.QueueFull:
+                        traces.increment("voice:telephony_audio_backpressure")
+                        await websocket.close(code=1013, reason="Telephony audio pipeline is busy")
+                        break
             elif event_type == "stop":
                 break
     except (WebSocketDisconnect, json.JSONDecodeError, ValueError):
         pass
     finally:
-        await audio_queue.put(None)
+        if audio_queue.full():
+            try:
+                audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        audio_queue.put_nowait(None)
         if active_task is not None and not active_task.done():
             active_task.cancel()
         if stt_task is not None and not stt_task.done():
             stt_task.cancel()
+        if lease_renewal_task is not None and not lease_renewal_task.done():
+            lease_renewal_task.cancel()
+        if receive_task is not None and not receive_task.done():
+            receive_task.cancel()
+        if termination_wait_task is not None and not termination_wait_task.done():
+            termination_wait_task.cancel()
         await asyncio.gather(
-            *(task for task in (active_task, stt_task) if task is not None), return_exceptions=True
+            *(
+                task
+                for task in (
+                    active_task,
+                    stt_task,
+                    lease_renewal_task,
+                    receive_task,
+                    termination_wait_task,
+                )
+                if task is not None
+            ),
+            return_exceptions=True,
         )
+        if telephony_lease_id is not None:
+            try:
+                await asyncio.to_thread(
+                    voice_sessions.release_external_lease, telephony_lease_id
+                )
+            except Exception:  # noqa: BLE001 - expired lease cleanup remains a fallback
+                traces.increment("voice:telephony_lease_release_failure")
         if telephony_call_started_at is not None:
             try:
                 await asyncio.to_thread(

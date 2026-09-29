@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { formatMetricName, parseAdminMetrics } from "../src/analytics.mjs";
+import { formatMetricName, parseAdminMetrics, providerPresentation } from "../src/analytics.mjs";
 
 const validMetrics = {
   traces: {
@@ -54,4 +54,19 @@ test("formats internal counter and latency names for a readable dashboard", () =
   assert.equal(formatMetricName("voice.first_audio_latency_ms"), "Voice First Audio Latency Ms");
   assert.equal(formatMetricName("agent:provider_error"), "Agent · Provider Error");
   assert.equal(formatMetricName("openai.tts_first_audio_ms"), "OpenAI TTS First Audio Ms");
+});
+
+test("provider analytics distinguish configured voice routes from verified calls", () => {
+  assert.deepEqual(providerPresentation("hybrid_voice_ready", true), {
+    label: "Configured · verify on call",
+    className: "configured",
+  });
+  assert.deepEqual(providerPresentation("live_voice_pipeline_ready", false), {
+    label: "Route unavailable",
+    className: "unavailable",
+  });
+  assert.deepEqual(providerPresentation("deepgram", true), {
+    label: "Credentials detected",
+    className: "configured",
+  });
 });

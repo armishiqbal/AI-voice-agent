@@ -34,7 +34,7 @@ Appointment transaction → PostgreSQL outbox → python worker.py
 ## Remaining end-to-end execution plan (current baseline)
 
 This is the current acceptance baseline as of 2026-09-29; it does not claim production
-readiness. The latest full local checks report 361 backend tests passed and 5 skipped, 64 frontend
+readiness. The latest full local checks report 378 backend tests passed and 5 skipped, 65 frontend
 tests passed, a successful production build, and passing Ruff, compilation, and diff checks. Backend
 WebSocket tests now stub STT so configured local provider credentials cannot make unit tests open
 live provider sockets. Deterministic capstone fixtures remain local-only evidence.
@@ -42,13 +42,15 @@ live provider sockets. Deterministic capstone fixtures remain local-only evidenc
 The hybrid Deepgram adapter sends `Finalize` at each browser VAD boundary, keeps its provider
 WebSocket alive with five-second `KeepAlive` messages between turns, and sends `CloseStream` only
 when the voice session ends. Stable final transcript segments are coalesced before agent processing.
-The latest three-turn synthetic loopback returned 3/3 transcripts, replies, and audio, but only 1/3
+An earlier three-turn synthetic loopback returned 3/3 transcripts, replies, and audio, but only 1/3
 substantive replies began under two seconds (1,761.5, 5,732.7, and 6,393.7 ms). On the two slow
-turns, final STT consumed 5,070–5,583 ms; reasoning and final-transcript-to-audio were fast. A direct
-Nova-3 multilingual 100 ms trial completed all three final transcripts but only one within two
-seconds and dropped the city/home request on the first turn, so it was rejected and the 300 ms
-default remains. These generated-speech samples establish neither UrduLish quality nor p95,
-physical playback, or human microphone acceptance.
+turns, final STT consumed 5,070–5,583 ms; reasoning and final-transcript-to-audio were fast. Two
+later repeated three-turn runs each met the target on all turns: substantive audio began in
+1,166–1,589 ms, with final transcripts in 709–918 ms. A direct Nova-3 multilingual 100 ms trial
+completed all three final transcripts but only one within two seconds and dropped the city/home
+request on the first turn, so it was rejected and the 300 ms default remains. These generated-speech
+samples establish neither UrduLish quality nor p95, physical playback, or human microphone
+acceptance.
 
 The latest live typed-chat probe returned HTTP 200 with deterministic fallback at 1,545.7 ms after
 the structured reasoning provider timed out at its 1.5-second deadline; readiness reported
@@ -60,8 +62,9 @@ and deployment acceptance remain outstanding. See `CAPSTONE_REQUIREMENTS.md` and
 `VERIFICATION_REPORT.md` for the requirement-by-requirement evidence.
 Deepgram STT results now preserve provider audio start/duration offsets and the runtime records the
 estimated sent-audio lead over the latest transcript cursor (`voice.stt_audio_cursor_lag_ms`). This
-is diagnostic instrumentation only; it requires a fresh provider-backed voice run to collect live
-measurements and does not change the model route or turn-acceptance boundary.
+is diagnostic instrumentation only; the latest repeated hybrid runs collected live transcript
+cursor and end-of-turn measurements, but the small sample does not establish a latency percentile.
+It does not change the model route or turn-acceptance boundary.
 
 JEV ranked the next major workstream against the known prerequisites and selected the live
 multilingual TTS proof gate first (1.0 recommendation probability and confidence, 2026-09-23).

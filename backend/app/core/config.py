@@ -113,6 +113,10 @@ class Settings(BaseSettings):
                     self.app_env == "development" and local_n8n and parsed_n8n.scheme == "http"
                 ))):
                 raise ValueError("N8N_WEBHOOK_URL must use HTTPS (local HTTP allowed in development)")
+            if self.google_token_path and not self.gmail_sender:
+                raise ValueError(
+                    "GMAIL_SENDER is required when n8n appointment delivery is enabled with Google Calendar"
+                )
         if self.app_env != "development" and self.llm_provider != "openai":
             raise ValueError("LLM_PROVIDER=openai is required for live conversations")
         if self.app_env != "development" and not self.openai_api_key:

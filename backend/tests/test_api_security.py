@@ -930,6 +930,8 @@ def test_hybrid_voice_records_deepgram_audio_cursor_lag_from_websocket_audio(
 
     measurements: dict[str, list[float]] = {}
     released_tickets: list[str] = []
+    monkeypatch.setattr(settings, "openai_realtime_tts_enabled", False)
+    assert settings.openai_realtime_tts_enabled is False
 
     class CursorSTT(DeepgramStreamingSTT):
         def __init__(self) -> None:
@@ -959,8 +961,21 @@ def test_hybrid_voice_records_deepgram_audio_cursor_lag_from_websocket_audio(
             yield AudioChunk(0, b"\x01\x00" * 80, language, 24_000)
             yield AudioChunk(1, b"", language, 24_000, is_final=True)
 
+    class FakeRealtimeTTS:
+        async def warmup(self) -> bool:
+            return False
+
+        async def aclose(self) -> None:
+            return None
+
+        async def synthesize_stream(self, text: str, language: str):
+            del text, language
+            if False:
+                yield AudioChunk(0, b"", "en", 24_000)
+
     provider = CursorSTT()
     monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: provider)
+    monkeypatch.setattr(api, "OpenAIRealtimeSpeechProvider", lambda **kwargs: FakeRealtimeTTS())
     monkeypatch.setattr(api, "tts", FakeTTS())
     monkeypatch.setattr(
         api.agent,
@@ -968,6 +983,7 @@ def test_hybrid_voice_records_deepgram_audio_cursor_lag_from_websocket_audio(
         lambda *args: AgentDecision(kind="answer", spoken_text="A verified option is available."),
     )
     monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    monkeypatch.setattr(api, "record_voice_call_outcome", lambda **kwargs: None)
     monkeypatch.setattr(
         api.traces,
         "observe",
@@ -1015,8 +1031,13 @@ def test_hybrid_voice_records_deepgram_audio_cursor_lag_from_websocket_audio(
 
     assert any(event.get("type") == "transcript" and event.get("is_final") for event in events)
     assert measurements["voice.stt_audio_cursor_lag_ms"] == [0.0]
-    # Always remove a lease left by a failed server cleanup assertion.
-    assert issued[0] in released_tickets
+    server_released = issued[0] in released_tickets
+    try:
+        assert server_released, "hybrid voice disconnect should release its server-side session lease"
+    finally:
+        # Keep a failed cleanup assertion from polluting later tests.
+        if not server_released:
+            actual_release(issued[0])
     assert api.voice_sessions.capacity_snapshot()["active"] == active_sessions_before
 
 
@@ -1502,6 +1523,17 @@ def test_hybrid_voice_waits_for_browser_commit_after_provider_endpointing() -> N
     assert api._is_turn_final("openai", early_endpoint, browser_committed=False) is False
     # Keep provider-owned end-of-turn behavior for the legacy standard route.
     assert api._is_turn_final("standard", early_endpoint, browser_committed=False) is True
+
+
+def test_stt_automatic_recovery_only_accepts_known_transient_failures() -> None:
+    import app.api.app as api
+
+    assert api._stt_failure_is_recoverable("stt_stream_ended") is True
+    assert api._stt_failure_is_recoverable("stt_provider_timeout") is True
+    assert api._stt_failure_is_recoverable("stt_provider_auth_rejected") is False
+    assert api._stt_failure_is_recoverable("stt_provider_insufficient_credits") is False
+    assert api._stt_failure_is_recoverable("stt_provider_rate_limited") is False
+    assert api._stt_failure_is_recoverable("unexpected_provider_error") is False
 
 
 def test_hybrid_finalize_deadline_covers_provider_read_started_before_browser_commit(
@@ -1998,14 +2030,16 @@ def test_stt_stream_drop_recovers_on_next_live_audio_frame(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("provider_message", "expected_reason"),
+    ("provider_message", "expected_reason", "expected_recoverable"),
     (
-        ("provider failure", "stt_provider_error"),
-        ("HTTP 401 unauthorized private-test-secret", "stt_provider_auth_rejected"),
+        ("provider failure", "stt_provider_error", True),
+        ("HTTP 401 unauthorized private-test-secret", "stt_provider_auth_rejected", False),
+        ("insufficient_quota.credit_balance_exhausted", "stt_provider_insufficient_credits", False),
+        ("HTTP 429 too many requests rate limit", "stt_provider_rate_limited", False),
     ),
 )
 def test_stt_provider_failure_after_normal_audio_end_is_reported(
-    monkeypatch, provider_message: str, expected_reason: str
+    monkeypatch, provider_message: str, expected_reason: str, expected_recoverable: bool
 ):
     import app.api.app as api
 
@@ -2044,5 +2078,5 @@ def test_stt_provider_failure_after_normal_audio_end_is_reported(
         assert event["type"] == "stt_unavailable"
         assert event["reason"] == expected_reason
         assert "private-test-secret" not in str(event)
-        assert event["recoverable"] is True
+        assert event["recoverable"] is expected_recoverable
         assert event["restart_required"] is True

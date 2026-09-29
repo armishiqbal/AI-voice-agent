@@ -11,6 +11,16 @@ TRANSCRIPTION_RECOVERY_PROMPTS = {
     "bn": "আপনার পুরো কথাটি বুঝতে পারিনি। দয়া করে আবার বলুন।",
 }
 
+TELEPHONY_PROVIDER_FAILURE_PROMPTS = {
+    "ur-Latn": "Maazrat, abhi call process karne mein masla aa raha hai. Baraye meherbani kuch dair baad dobara call kijiye.",
+    "ur-Arab": "معذرت، ابھی کال پراسیس کرنے میں مسئلہ آ رہا ہے۔ براہِ کرم کچھ دیر بعد دوبارہ کال کیجیے۔",
+    "en": "I'm having trouble processing calls right now. Please call back shortly.",
+    "hi": "क्षमा कीजिए, अभी कॉल में तकनीकी समस्या आ रही है। कृपया थोड़ी देर बाद फिर कॉल करें।",
+    "ar": "عذرًا، أواجه مشكلة في معالجة المكالمات الآن. يُرجى إعادة الاتصال بعد قليل.",
+    "pa": "معذرت، ہنیر کال وچ مسئلہ آ ریا اے۔ مہربانی کرکے تھوڑی دیر بعد دوبارہ کال کرو۔",
+    "bn": "দুঃখিত, এখন কলটি প্রক্রিয়া করতে সমস্যা হচ্ছে। অনুগ্রহ করে একটু পরে আবার কল করুন।",
+}
+
 
 def transcription_recovery_prompt(language: str, transcript: str | None = None) -> str | None:
     """Ask the caller to restate the request, never to act on an interim transcript."""
@@ -35,3 +45,11 @@ def transcription_recovery_prompt(language: str, transcript: str | None = None) 
         "bn": f'এই অংশটি শুনেছি: “{excerpt}”। বাকিটা বুঝতে পারিনি। পুরো অনুরোধটি আবার বলুন।',
     }
     return restatement_prompts.get(language, prompt)
+
+
+def telephony_provider_failure_prompt(language: str) -> str:
+    """Give phone callers a brief truthful message before a failed call is closed."""
+
+    return TELEPHONY_PROVIDER_FAILURE_PROMPTS.get(
+        language, TELEPHONY_PROVIDER_FAILURE_PROMPTS["en"]
+    )

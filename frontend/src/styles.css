@@ -1880,7 +1880,7 @@ svg {
 .analytics-provider-list li, .analytics-counter-list li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; color: var(--text-secondary); border: 1px solid var(--border-subtle); border-radius: 8px; font-size: 11px; }
 .analytics-provider-list li > span:nth-child(2), .analytics-counter-list li > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .analytics-provider-list strong, .analytics-counter-list strong { color: #fff; font-size: 10px; }
-.analytics-provider-list .ready .analytics-provider-dot { background: #34d399; box-shadow: 0 0 8px rgba(52,211,153,.5); }
+.analytics-provider-list .configured .analytics-provider-dot { background: #60a5fa; }
 .analytics-provider-list .unavailable .analytics-provider-dot { background: #f87171; }
 .analytics-provider-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #fbbf24; }
 .analytics-reasoning { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 12px; margin-top: 10px; padding: 10px 12px; color: var(--text-secondary); border: 1px solid var(--border-subtle); border-radius: 9px; background: rgba(255,255,255,.035); font-size: 11px; }

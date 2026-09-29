@@ -40,7 +40,7 @@
 - `POST /v1/properties/import-file?filename=inventory.csv&source=crm-export-v1` — raw CSV/JSON
   upload with row-level validation; accepted and rejected rows are both recorded in the batch ledger.
 - `python scripts/data/import_inventory.py` — CSV/JSON importer with row-level validation errors.
-- `POST /v1/knowledge/ingest-file?filename=brochure.pdf&source=brochure-v1&property_id=PROP-001`
+- `POST /v1/knowledge/ingest-file?filename=brochure.pdf&source=brochure-v1&property_id={id-returned-by-GET-v1-properties}`
   — chunks a PDF/text brochure or FAQ and upserts it to Pinecone when configured; returns 503
   instead of pretending ingestion succeeded when the provider is absent.
 
@@ -107,7 +107,14 @@ lead record and emitted in the internal outbox event for operator follow-up sche
 - `POST /v1/telephony/calls` — admin-protected outbound E.164 call request through the configured
   Twilio adapter. It returns a call SID and media WebSocket URL; no call is created without complete
   server-side credentials.
-- `POST /v1/telephony/inbound` — signed Twilio webhook returning media-stream TwiML.
+- `POST /v1/telephony/inbound` — signed Twilio webhook returning media-stream TwiML after it
+  reserves a shared database-backed voice-capacity lease for the CallSid. When capacity is full,
+  the caller hears a brief busy message and the call ends.
 - `WS /v1/telephony/media` — signed Twilio 8 kHz μ-law media bridge to Deepgram, LangGraph, and
-  PCM16 TTS. Fish/MP3 output is rejected at this boundary; configure a PCM16 TTS provider for
-  phone calls.
+  PCM16 TTS. It renews and releases the call's shared lease, accepts only the reserved CallSid,
+  rejects invalid or oversized frames, and bounds queued audio to 100 media frames. Low-confidence
+  speech gets a spoken repeat prompt; transient STT failures get at most two reconnect attempts,
+  and permanent STT or agent-processing failures get a spoken service message before the call
+  closes. Transcript-store errors are measured without suppressing recovery audio. Unconfirmed
+  text is never sent to the agent. Fish/MP3 output is rejected at this boundary; configure a PCM16
+  TTS provider for phone calls.

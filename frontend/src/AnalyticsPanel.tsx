@@ -1,5 +1,5 @@
 import React, { useRef, useState, type FormEvent } from "react";
-import { formatMetricName, parseAdminMetrics, type AdminMetrics } from "./analytics.mjs";
+import { formatMetricName, parseAdminMetrics, providerPresentation, type AdminMetrics } from "./analytics.mjs";
 import { useNativeDialog } from "./useNativeDialog";
 
 type AnalyticsPanelProps = {
@@ -183,15 +183,16 @@ export function AnalyticsPanel({ apiUrl, open, onClose }: AnalyticsPanelProps) {
               <h3 id="analytics-provider-title">Provider readiness</h3>
               {providerEntries.length === 0 ? <p>No provider readiness fields were returned.</p> : (
                 <ul className="analytics-provider-list">
-                  {providerEntries.map(([name, ready]) => (
-                    <li key={name} className={ready ? "ready" : "unavailable"}>
-                      <span className="analytics-provider-dot" />
-                      <span>{formatMetricName(name)}</span>
-                      <strong>{name.endsWith("_voice_ready") || name === "live_voice_pipeline_ready"
-                        ? ready ? "Route available" : "Route unavailable"
-                        : ready ? "Credentials detected" : "Not configured"}</strong>
-                    </li>
-                  ))}
+                  {providerEntries.map(([name, ready]) => {
+                    const presentation = providerPresentation(name, ready);
+                    return (
+                      <li key={name} className={presentation.className}>
+                        <span className="analytics-provider-dot" />
+                        <span>{formatMetricName(name)}</span>
+                        <strong>{presentation.label}</strong>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
               <p className="analytics-footnote">“Credentials detected” confirms configuration only. Route availability does not prove usable provider credits or a completed call.</p>

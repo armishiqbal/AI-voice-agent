@@ -109,6 +109,15 @@ export function resolveAudioUnavailableMessage(reason) {
 }
 
 export function resolveSttUnavailableMessage(reason) {
+  if (reason === "stt_finalize_timeout") {
+    return "I couldn't confirm the full sentence before the speech timeout, so I didn't send partial words to the assistant. Please repeat briefly or type your request.";
+  }
+  if (reason === "stt_provider_unavailable" || reason === "Streaming STT is not configured") {
+    return "Speech recognition is not ready on this server. Check provider readiness or type your request.";
+  }
+  if (reason === "stt_provider_error") {
+    return "Speech recognition failed before I could confirm your request. Please reconnect or type it instead.";
+  }
   if (reason === "stt_provider_insufficient_credits") {
     return "Speech provider credits are exhausted. Add provider credits or choose a funded speech recognition route, then reconnect.";
   }

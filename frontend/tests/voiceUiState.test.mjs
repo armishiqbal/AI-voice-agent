@@ -81,6 +81,11 @@ test("provider credit exhaustion explains the real blocker without offering a fu
 });
 
 test("speech provider failures show actionable credit and credential guidance", () => {
+  assert.match(resolveSttUnavailableMessage("stt_finalize_timeout"), /didn't send partial words/i);
+  assert.match(resolveSttUnavailableMessage("stt_finalize_timeout"), /repeat briefly or type/i);
+  assert.match(resolveSttUnavailableMessage("stt_provider_unavailable"), /not ready on this server/i);
+  assert.match(resolveSttUnavailableMessage("Streaming STT is not configured"), /check provider readiness/i);
+  assert.match(resolveSttUnavailableMessage("stt_provider_error"), /failed before I could confirm/i);
   assert.match(resolveSttUnavailableMessage("stt_provider_insufficient_credits"), /credits are exhausted/i);
   assert.match(resolveSttUnavailableMessage("stt_provider_auth_rejected"), /rejected its credentials/i);
   assert.match(resolveSttUnavailableMessage("stt_unknown"), /reconnect or type instead/i);

@@ -38,6 +38,28 @@ def test_n8n_configuration_requires_https_and_paired_token():
     }
 
 
+def test_n8n_appointment_delivery_requires_both_calendar_and_gmail_configuration():
+    with pytest.raises(ValidationError, match="GMAIL_SENDER is required"):
+        Settings(
+            google_token_path="token.json",
+            gmail_sender=None,
+            n8n_webhook_url="https://example.com/webhook",
+            n8n_webhook_token="test-token",
+        )
+
+    complete_pipeline = Settings(
+        google_token_path="token.json",
+        gmail_sender="agent@example.com",
+        n8n_webhook_url="https://example.com/webhook",
+        n8n_webhook_token="test-token",
+    )
+    assert set(build_outbox_handlers(complete_pipeline)) >= {
+        "appointment.booked",
+        "appointment.rescheduled",
+        "appointment.cancelled",
+    }
+
+
 @pytest.mark.asyncio
 async def test_partial_delivery_retry_skips_already_completed_provider():
     calls = []

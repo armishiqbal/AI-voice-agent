@@ -4,8 +4,9 @@
 
 - Import CSV/JSON with `python scripts/data/import_inventory.py path.csv --source crm-export-v1`.
 - The browser's inventory panel offers a headers-only CSV template. It contains no example listings; fill it with owner-approved records. Use `sale`, `rent`, `commercial`, or `investment` for purpose; enter prices as positive PKR integers; use `true`/`false` for availability; list-valued columns use `|` separators. Unknown availability values are rejected instead of silently becoming `false`.
-- Ingest brochures/FAQs with `python scripts/data/ingest_knowledge.py path.pdf --source brochure-v1
-  --property-id PROP-001` after configuring OpenAI and Pinecone.
+- Ingest brochures/FAQs with `python scripts/data/ingest_knowledge.py path.pdf --source brochure-v1`.
+  For property-specific documents, use a property ID returned by `GET /v1/properties` after
+  importing owner-approved inventory; there is no bundled runtime listing ID.
 - Inspect import validation errors and provenance before treating records as authoritative.
 - Outside development, send `X-Admin-Api-Key: $ADMIN_API_KEY` for inventory imports, knowledge
   ingestion, metrics, evaluation, outbox, and audit endpoints. The consented lead form is public

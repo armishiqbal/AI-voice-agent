@@ -127,6 +127,80 @@ def test_calendar_delivery_contains_client_context(monkeypatch) -> None:
     assert "+923001234567" in body["description"]
 
 
+def test_calendar_retry_updates_the_event_for_its_reference_and_keeps_pk_time(monkeypatch) -> None:
+    events_by_id: dict[str, dict[str, object]] = {}
+    inserts: list[dict[str, object]] = []
+    updates: list[str] = []
+
+    class Request:
+        def __init__(self, action):
+            self.action = action
+
+        def execute(self):
+            return self.action()
+
+    class Events:
+        def list(self, **kwargs):
+            reference_filter = kwargs["privateExtendedProperty"]
+            reference = reference_filter.split("=", maxsplit=1)[1]
+            return Request(
+                lambda: {
+                    "items": [
+                        event
+                        for event in events_by_id.values()
+                        if event["extendedProperties"]["private"]["appointment_reference"]
+                        == reference
+                    ]
+                }
+            )
+
+        def insert(self, *, calendarId, body, sendUpdates):
+            del calendarId, sendUpdates
+            inserts.append(body)
+
+            def create_event():
+                event = {"id": "event-1", **body}
+                events_by_id[event["id"]] = event
+                return event
+
+            return Request(create_event)
+
+        def update(self, *, calendarId, eventId, body, sendUpdates):
+            del calendarId, sendUpdates
+            updates.append(eventId)
+
+            def update_event():
+                event = {"id": eventId, **body}
+                events_by_id[eventId] = event
+                return event
+
+            return Request(update_event)
+
+    class Service:
+        def events(self):
+            return Events()
+
+    monkeypatch.setattr(calendar_module, "load_google_service", lambda *args, **kwargs: Service())
+    payload = {
+        "reference": "AES-IDEMPOTENT",
+        "property_id": "OWNER-PROPERTY-1",
+        "starts_at": "2026-09-28T06:00:00+00:00",
+        "event_type": "appointment.booked",
+    }
+    handler = GoogleCalendarHandler("token.json")
+
+    first = handler._handle(payload)
+    replay = handler._handle(payload)
+
+    assert first["event_id"] == replay["event_id"] == "event-1"
+    assert len(inserts) == 1
+    assert updates == ["event-1"]
+    assert events_by_id["event-1"]["start"] == {
+        "dateTime": "2026-09-28T11:00:00+05:00",
+        "timeZone": "Asia/Karachi",
+    }
+
+
 def test_internal_handlers_do_not_claim_fake_whatsapp_delivery() -> None:
     from app.workers.handlers import build_internal_handlers
 

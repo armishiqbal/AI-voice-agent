@@ -44,6 +44,12 @@ does not finalize in time, the API discards the partial turn and asks the caller
 request. When partial words were recognized, the spoken retry briefly quotes them to explain what
 was heard; without partial text it uses a generic retry. The quote is recovery context only: the
 caller must restate the request, and unstable text is never sent to the agent or booking tools.
+If speech recognition cannot confirm a complete turn, the UI names the finalization timeout and
+explains that partial words were not sent; provider-not-ready, authentication, rate-limit, credit,
+and timeout failures have separate guidance. Only known transient stream-close, provider-timeout,
+finalization-timeout, and generic provider errors trigger automatic STT restart. Authentication,
+credit, rate-limit, unconfigured, and unknown failures stop automatic retries so the app does not
+loop against a condition that needs an operator or a cooldown.
 
 For Deepgram sessions, the API opens the provider WebSocket before sending the initial
 `audio_input_available=true` state, so the browser does not start microphone capture against a
@@ -112,8 +118,15 @@ identity.
 Phone entry is disabled by default. To enable the optional Twilio boundary, install
 `pip install -e 'backend[telephony]'`, configure the four `TWILIO_*`/`TELEPHONY_PUBLIC_BASE_URL`
 settings, expose the API over HTTPS, and validate the carrier signature/recording-consent policy.
-The phone bridge requires a PCM16 TTS provider; Fish Audio MP3 output is not accepted by the media
-bridge.
+The signed inbound webhook reserves the same database-backed global and per-client call capacity
+as browser voice; Twilio streams must carry the reserved CallSid and renew that lease while active.
+At capacity, Twilio receives a short busy message instead of opening another provider stream. Media
+payloads are validated and the input queue is capped at 100 frames. The phone bridge requires a
+PCM16 TTS provider; Fish Audio MP3 output is not accepted by the media bridge. Public TLS, phone
+number setup, consent language, and an actual carrier acceptance call still require deployment.
+Low-confidence transcripts receive a spoken repeat request, transient STT failures are retried up
+to twice, and permanent STT or agent-processing failures receive a brief spoken notice before the
+call closes. Transcript storage failure is observable but does not block recovery speech.
 
 For local open-source multilingual TTS, run the Parler and Chatterbox workers in separate
 virtual environments as documented in `TTS_EVALUATION.md`; their Transformers dependencies

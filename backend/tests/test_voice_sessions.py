@@ -121,6 +121,43 @@ def test_voice_session_leases_enforce_global_and_per_client_limits(tmp_path: Pat
     engine.dispose()
 
 
+def test_external_call_leases_share_limits_and_are_idempotent(tmp_path: Path) -> None:
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'voice-external-leases.db'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    service = VoiceSessionService(
+        f"external-lease-test-key-{uuid4()}",
+        session_factory=sessions,
+        max_active_total=1,
+        max_active_per_client=1,
+    )
+
+    browser_ticket = service.issue("192.0.2.41", "https://voice.example.com")
+    assert browser_ticket is not None
+    assert (
+        service.consume(browser_ticket[0], "192.0.2.41", "https://voice.example.com")
+        == VoiceSessionConsumeResult.ACCEPTED
+    )
+    assert not service.acquire_external_lease("twilio:CA-browser-blocked", "+923001234567")
+    service.release(browser_ticket[0])
+
+    assert service.acquire_external_lease("twilio:CA123", "+923001234567")
+    assert service.acquire_external_lease("twilio:CA123", "+923001234567")
+    assert not service.acquire_external_lease("twilio:CA456", "+923009876543")
+    assert service.renew_external_lease("twilio:CA123")
+    assert service.capacity_snapshot()["active"] == 1
+
+    service.release_external_lease("twilio:CA123")
+    assert not service.renew_external_lease("twilio:CA123")
+    assert service.acquire_external_lease("twilio:CA456", "+923009876543")
+    service.release_external_lease("twilio:CA456")
+    assert service.capacity_snapshot()["active"] == 0
+    engine.dispose()
+
+
 def test_voice_session_normalizes_loopback_and_ports(tmp_path: Path) -> None:
     engine = create_engine(
         f"sqlite:///{tmp_path / 'voice-loopback.db'}",
