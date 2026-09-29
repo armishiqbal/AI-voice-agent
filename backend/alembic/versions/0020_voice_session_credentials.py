@@ -1,8 +1,8 @@
 """Persist hashed one-use voice tickets and cross-worker issue limits."""
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0020_voice_session_credentials"
 down_revision = "0019_lead_follow_up"

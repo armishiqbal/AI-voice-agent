@@ -10,7 +10,7 @@ export class VoiceActivityDetector {
   private speechMs = 0;
 
   constructor(
-    private readonly endSilenceMs = 650,
+    private readonly endSilenceMs = 425,
     private readonly maxTurnMs = 20_000,
   ) {}
 

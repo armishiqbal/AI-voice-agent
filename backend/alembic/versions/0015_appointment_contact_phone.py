@@ -1,8 +1,8 @@
 """Persist an optional consented appointment phone number encrypted at application level."""
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0015_appointment_contact_phone"
 down_revision = "0014_active_appointment_slot"

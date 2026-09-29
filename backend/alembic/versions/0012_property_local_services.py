@@ -1,6 +1,6 @@
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0012_property_local_services"
 down_revision = "0011_conversation_state_retention"

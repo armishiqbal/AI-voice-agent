@@ -42,6 +42,45 @@ test("parseServerEvent validates known voice events", () => {
     type: "agent_response",
     decision: { kind: "answer", spoken_text: "Assalam-o-Alaikum", property_ids: ["PROP-001"] },
   })).decision.spoken_text, "Assalam-o-Alaikum");
+  assert.equal(protocol.parseServerEvent(JSON.stringify({
+    type: "agent_response",
+    decision: {
+      kind: "ask_clarification",
+      spoken_text: "Please say that again.",
+      reason: "transcription_incomplete",
+    },
+  })).decision.reason, "transcription_incomplete");
+  assert.equal(protocol.parseServerEvent(JSON.stringify({
+    type: "agent_response",
+    reasoning_status: "cooldown",
+    reasoning_failure_category: "rate_limited",
+    decision: { kind: "ask_clarification", spoken_text: "Please repeat that." },
+  })).reasoning_failure_category, "rate_limited");
+  assert.equal(protocol.parseServerEvent(JSON.stringify({
+    type: "agent_response",
+    reasoning_status: "provider_error",
+    reasoning_failure_category: "secret_provider_message",
+    decision: { kind: "ask_clarification", spoken_text: "Please repeat that." },
+  })), null);
+  assert.equal(protocol.parseServerEvent(JSON.stringify({
+    type: "agent_response",
+    reasoning_status: "healthy",
+    decision: { kind: "ask_clarification", spoken_text: "Please repeat that." },
+  })), null);
+  assert.equal(protocol.parseServerEvent(JSON.stringify({
+    type: "audio_chunk",
+    encoding: "pcm_s16le",
+    sample_rate: 24_000,
+    audio_base64: "AAAA",
+    acknowledgement: true,
+  })).acknowledgement, true);
+  assert.equal(protocol.parseServerEvent(JSON.stringify({
+    type: "audio_chunk",
+    encoding: "pcm_s16le",
+    sample_rate: 24_000,
+    audio_base64: "AAAA",
+    acknowledgement: "yes",
+  })), null);
 });
 
 test("parseServerEvent rejects malformed, unknown, and unsafe audio events", () => {
@@ -119,7 +158,7 @@ test("audioUplinkState stops capture before the browser send queue grows without
 });
 
 test("adaptive voice activity detection starts on quiet speech and ends after silence", () => {
-  const vad = new vadModule.VoiceActivityDetector();
+  const vad = new vadModule.VoiceActivityDetector(650);
   assert.equal(vad.process(0.001, 256), null);
   assert.equal(vad.process(0.006, 256), "speech_started");
   assert.equal(vad.process(0.01, 256), null);
@@ -137,6 +176,29 @@ test("adaptive voice activity detection learns background noise and bounds long 
   assert.equal(vad.process(0.01, 100), "speech_started");
   assert.equal(vad.process(0.03, 500), null);
   assert.equal(vad.process(0.03, 500), "speech_ended");
+});
+
+test("browser VAD preserves a 400 ms thinking pause before committing the turn", () => {
+  const vad = new vadModule.VoiceActivityDetector(425);
+  for (let elapsed = 0; elapsed < 300; elapsed += 100) {
+    assert.equal(vad.process(0.001, 100), null);
+  }
+  assert.equal(vad.process(0.02, 200), "speech_started");
+  assert.equal(vad.process(0.001, 400), null);
+  assert.equal(vad.process(0.02, 200), null);
+  assert.equal(vad.process(0.001, 400), null);
+  assert.equal(vad.process(0.001, 100), "speech_ended");
+});
+
+test("browser VAD keeps a 400 ms pause across 80 ms capture frames", () => {
+  const vad = new vadModule.VoiceActivityDetector();
+  for (let elapsed = 0; elapsed < 320; elapsed += 80) assert.equal(vad.process(0.001, 80), null);
+  assert.equal(vad.process(0.02, 80), null);
+  assert.equal(vad.process(0.02, 80), "speech_started");
+  for (let frame = 0; frame < 5; frame += 1) assert.equal(vad.process(0.001, 80), null);
+  assert.equal(vad.process(0.02, 80), null);
+  for (let frame = 0; frame < 5; frame += 1) assert.equal(vad.process(0.001, 80), null);
+  assert.equal(vad.process(0.001, 80), "speech_ended");
 });
 
 test("a short microphone click does not begin a voice turn", () => {

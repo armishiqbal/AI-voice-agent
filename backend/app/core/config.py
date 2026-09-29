@@ -25,21 +25,28 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"
     llm_model: str = "gpt-4o-mini"
     openai_api_key: str | None = None
-    openai_tts_model: str = "gpt-4o-mini-tts"
-    openai_tts_voice: str = "marin"
+    openai_tts_model: str = "tts-1"
+    openai_tts_voice: str = "alloy"
+    openai_realtime_tts_enabled: bool = False
+    openai_realtime_tts_model: str = "gpt-realtime-1.5"
+    openai_realtime_tts_first_audio_timeout_seconds: float = Field(default=1.8, ge=0.5, le=10)
     openai_realtime_transcription_model: str = "gpt-live-transcribe"
+    openai_realtime_transcription_timeout_seconds: float = Field(default=8.0, ge=1, le=60)
     deepgram_api_key: str | None = None
     fish_audio_api_key: str | None = None
-    fish_audio_model: str = "s2.1-pro"
+    fish_audio_model: Literal[
+        "s1", "s2-pro", "s2.1-pro", "s2.1-pro-free", "drama-3-preview"
+    ] = "s2.1-pro"
     fish_audio_reference_id: str | None = None
-    fish_audio_sample_rate: int = 24_000
-    fish_audio_latency: str = "low"
+    fish_audio_sample_rate: Literal[32_000, 44_100] = 44_100
+    fish_audio_latency: Literal["balanced", "normal"] = "balanced"
     voice_early_clause_streaming_enabled: bool = False
     voice_emotion_matching_enabled: bool = True
     elevenlabs_api_key: str | None = None
     elevenlabs_voice_id: str | None = None
     elevenlabs_model: str = "eleven_multilingual_v2"
     llm_timeout_seconds: float = 20.0
+    llm_decision_timeout_seconds: float = Field(default=1.5, ge=0.5, le=20.0)
     rag_provider: Literal["pinecone", "faiss"] = "pinecone"
     rag_local_path: str = "artifacts/knowledge/faiss.json"
     pinecone_api_key: str | None = None
@@ -65,9 +72,13 @@ class Settings(BaseSettings):
     stt_model: str = "nova-3"
     stt_language: str = "multi"
     stt_sample_rate: int = 16_000
+    # Allow Deepgram to emit a stable segment before the browser's 425 ms
+    # commit; browser VAD remains authoritative for completing the turn.
     stt_endpointing_ms: int = 300
     stt_utterance_end_ms: int = 1_000
     stt_min_confidence: float = 0.55
+    stt_transport_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
+    stt_finalize_timeout_seconds: float = Field(default=6.0, ge=1.0, le=15.0)
     voice_max_audio_frame_bytes: int = 16_384
     voice_audio_queue_frames: int = 256
     voice_max_event_bytes: int = 8_192
@@ -125,8 +136,6 @@ class Settings(BaseSettings):
         self.tts_provider = self.tts_provider.casefold()
         if self.tts_provider.casefold() not in {"router", "fish", "elevenlabs", "opensource"}:
             raise ValueError("TTS_PROVIDER must be router, fish, elevenlabs, or opensource")
-        if self.fish_audio_latency not in {"ultra_low", "low", "balanced", "normal"}:
-            raise ValueError("FISH_AUDIO_LATENCY must be ultra_low, low, balanced, or normal")
         if self.tts_timeout_seconds <= 0:
             raise ValueError("TTS_TIMEOUT_SECONDS must be positive")
         if self.tts_provider.casefold() == "opensource" and self.app_env != "development":

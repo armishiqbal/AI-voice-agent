@@ -114,7 +114,7 @@ def build_knowledge_store(config: object) -> object | None:
     provider = getattr(config, "rag_provider", "pinecone")
     if not openai_key or (provider == "pinecone" and (not api_key or not index_name)):
         return None
-    from app.integrations.llm import LLMDecisionError, OpenAIEmbeddingProvider
+    from app.integrations.llm import OpenAIEmbeddingProvider
 
     try:
         embeddings = OpenAIEmbeddingProvider(
@@ -132,5 +132,5 @@ def build_knowledge_store(config: object) -> object | None:
             embeddings,
             namespace=getattr(config, "pinecone_namespace", "default"),
         )
-    except (LLMDecisionError, RAGProviderError, RuntimeError, Exception):
+    except Exception:  # noqa: BLE001 - fail closed if an optional RAG provider cannot initialize
         return None

@@ -45,7 +45,11 @@ def _coerce_row(row: dict[str, Any]) -> dict[str, Any]:
                 item.strip() for item in values[key].replace(",", "|").split("|") if item.strip()
             ]
     if isinstance(values.get("available"), str):
-        values["available"] = values["available"].strip().lower() in {"1", "true", "yes", "y"}
+        availability = values["available"].strip().lower()
+        if availability in {"1", "true", "yes", "y"}:
+            values["available"] = True
+        elif availability in {"0", "false", "no", "n"}:
+            values["available"] = False
     return values
 
 

@@ -29,6 +29,9 @@ export class BrowserAudioPlayback {
   private mediaEnded = false;
 
   constructor(handlers: PlaybackHandlers = {}) { this.handlers = handlers; }
+  get isActive(): boolean {
+    return this.sources.size > 0 || this.pendingDecodes > 0 || Boolean(this.mediaSource && !this.mediaEnded);
+  }
   setHandlers(handlers: PlaybackHandlers): void { this.handlers = handlers; }
   getAnalyser(): AnalyserNode | null { return this.analyser; }
   async activate(): Promise<void> {

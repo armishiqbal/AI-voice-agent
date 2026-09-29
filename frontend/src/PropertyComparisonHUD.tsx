@@ -1,4 +1,6 @@
 import React from "react";
+import { availabilityLabel, canRequestVisit, inventorySourceLabel } from "./propertyFacts.mjs";
+import { useNativeDialog } from "./useNativeDialog";
 
 type Property = {
   id: string;
@@ -12,7 +14,9 @@ type Property = {
   amenities: string[];
   payment_plan: string;
   assigned_employee: string;
-  source?: string;
+  available: boolean;
+  source_version: string;
+  source: string;
 };
 
 type PropertyComparisonHUDProps = {
@@ -34,166 +38,122 @@ function formatPricePKR(price: number): string {
 }
 
 function getMarlaEquivalent(sqft: number): string {
-  if (sqft >= 4500) {
-    return `${(sqft / 4500).toFixed(1)} Kanal`;
-  }
-  return `${(sqft / 225).toFixed(1)} Marla`;
+  return sqft >= 4_500
+    ? `${(sqft / 4_500).toFixed(1).replace(/\.0$/, "")} Kanal`
+    : `${(sqft / 225).toFixed(1).replace(/\.0$/, "")} Marla`;
 }
 
-function getNocStatus(area: string): { status: string; authority: string } {
-  const a = area.toLowerCase();
-  if (a.includes("clifton")) return { status: "SBCA APPROVED", authority: "Sindh Building Control Authority" };
-  if (a.includes("dha")) return { status: "DHA APPROVED", authority: "Defence Housing Authority / Cantonment" };
-  if (a.includes("gulberg")) return { status: "LDA APPROVED", authority: "Lahore Development Authority" };
-  if (a.includes("blue area") || a.includes("f-11")) return { status: "CDA APPROVED", authority: "Capital Development Authority" };
-  return { status: "VERIFIED CLEAR TITLE", authority: "Local Land Registry & Town Planning" };
+function PropertyValue({ children }: { children: React.ReactNode }) {
+  return <td className="feature-val">{children}</td>;
 }
 
 export function PropertyComparisonHUD({ properties, onClose, onBook }: PropertyComparisonHUDProps) {
-  if (!properties || properties.length === 0) return null;
+  const dialogRef = useNativeDialog(true);
+  if (!properties.length) return null;
 
   return (
-    <div className="orbit-modal-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Property Comparison HUD">
-      <div className="compare-hud-window" onClick={(e) => e.stopPropagation()}>
-        <div className="compare-hud-header">
+    <dialog
+      ref={dialogRef}
+      className="orbit-native-modal"
+      aria-labelledby="compare-listings-title"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
+      <section className="compare-hud-window">
+        <header className="compare-hud-header">
           <div className="compare-header-title">
             <span className="compare-pulse-dot" />
-            <h3>Side-by-Side Verified Property Comparison HUD</h3>
-            <span className="compare-badge">{properties.length} Properties Selected</span>
+            <h3 id="compare-listings-title">Compare property listings</h3>
+            <span className="compare-badge">{properties.length} selected</span>
           </div>
-          <button type="button" className="compare-close-btn" onClick={onClose} aria-label="Close Comparison">
-            ✕
-          </button>
-        </div>
+          <button type="button" className="compare-close-btn" onClick={onClose} aria-label="Close comparison">×</button>
+        </header>
 
         <div className="compare-grid-container">
           <table className="compare-table">
             <thead>
               <tr>
-                <th className="feature-col">Property Metric</th>
-                {properties.map((p) => (
-                  <th key={p.id} className="prop-col">
-                    <span className="prop-col-id">{p.id}</span>
-                    <h4 className="prop-col-title">{p.title}</h4>
-                    <span className="prop-col-geo">{p.area}, {p.city}</span>
+                <th className="feature-col">Listing detail</th>
+                {properties.map((property) => (
+                  <th key={property.id} className="prop-col">
+                    <span className="prop-col-id">{property.id}</span>
+                    <h4 className="prop-col-title">{property.title}</h4>
+                    <span className="prop-col-geo">{property.area}, {property.city}</span>
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td className="feature-name">Total Price</td>
-                {properties.map((p) => (
-                  <td key={p.id} className="feature-val price-val">
-                    {formatPricePKR(p.price_pkr)}
-                  </td>
+                <td className="feature-name">Price</td>
+                {properties.map((property) => <PropertyValue key={property.id}>{formatPricePKR(property.price_pkr)}</PropertyValue>)}
+              </tr>
+              <tr>
+                <td className="feature-name">Price per sq ft (calculated)</td>
+                {properties.map((property) => (
+                  <PropertyValue key={property.id}>PKR {Math.round(property.price_pkr / property.size_sqft).toLocaleString()} / sq ft</PropertyValue>
                 ))}
               </tr>
-
               <tr>
-                <td className="feature-name">Price / Sq Ft</td>
-                {properties.map((p) => {
-                  const ppsf = Math.round(p.price_pkr / Math.max(p.size_sqft, 1));
-                  return (
-                    <td key={p.id} className="feature-val">
-                      PKR {ppsf.toLocaleString()} / sq ft
-                    </td>
-                  );
-                })}
-              </tr>
-
-              <tr>
-                <td className="feature-name">Size & Land Unit</td>
-                {properties.map((p) => (
-                  <td key={p.id} className="feature-val">
-                    <strong>{p.size_sqft.toLocaleString()} sq ft</strong>
-                    <div className="sub-unit">({getMarlaEquivalent(p.size_sqft)})</div>
-                  </td>
+                <td className="feature-name">Size</td>
+                {properties.map((property) => (
+                  <PropertyValue key={property.id}>{property.size_sqft.toLocaleString()} sq ft · {getMarlaEquivalent(property.size_sqft)}</PropertyValue>
                 ))}
               </tr>
-
               <tr>
-                <td className="feature-name">Layout & Beds</td>
-                {properties.map((p) => (
-                  <td key={p.id} className="feature-val">
-                    {p.bedrooms > 0 ? `${p.bedrooms} Bedrooms` : "Commercial Open Plan"}
-                  </td>
+                <td className="feature-name">Purpose and bedrooms</td>
+                {properties.map((property) => (
+                  <PropertyValue key={property.id}>{property.purpose} · {property.bedrooms > 0 ? `${property.bedrooms} bedrooms` : "Commercial"}</PropertyValue>
                 ))}
               </tr>
-
               <tr>
-                <td className="feature-name">Investment Purpose</td>
-                {properties.map((p) => (
-                  <td key={p.id} className="feature-val">
-                    <span className="purpose-tag">{p.purpose.toUpperCase()}</span>
-                  </td>
+                <td className="feature-name">Payment plan</td>
+                {properties.map((property) => <PropertyValue key={property.id}>{property.payment_plan || "Not provided"}</PropertyValue>)}
+              </tr>
+              <tr>
+                <td className="feature-name">Availability</td>
+                {properties.map((property) => (
+                  <PropertyValue key={property.id}>
+                    <span className={`availability-badge ${property.available ? "available" : "unavailable"}`}>
+                      {availabilityLabel(property.available)}
+                    </span>
+                  </PropertyValue>
                 ))}
               </tr>
-
               <tr>
-                <td className="feature-name">Estimated Rental Yield</td>
-                {properties.map((p) => {
-                  const yieldPct = p.city === "Karachi" ? "5.8% - 6.5%" : p.city === "Islamabad" ? "6.0% - 7.0%" : "4.8% - 5.5%";
-                  return (
-                    <td key={p.id} className="feature-val yield-val">
-                      {yieldPct} Gross ROI
-                    </td>
-                  );
-                })}
-              </tr>
-
-              <tr>
-                <td className="feature-name">Payment Schedule</td>
-                {properties.map((p) => (
-                  <td key={p.id} className="feature-val">
-                    {p.payment_plan}
-                  </td>
+                <td className="feature-name">Inventory source</td>
+                {properties.map((property) => (
+                  <PropertyValue key={property.id}>
+                    {inventorySourceLabel(property.source, property.source_version)}
+                  </PropertyValue>
                 ))}
               </tr>
-
               <tr>
-                <td className="feature-name">Regulatory NOC Status</td>
-                {properties.map((p) => {
-                  const noc = getNocStatus(p.area);
-                  return (
-                    <td key={p.id} className="feature-val">
-                      <span className="noc-verified-badge">{noc.status}</span>
-                      <div className="noc-auth-text">{noc.authority}</div>
-                    </td>
-                  );
-                })}
+                <td className="feature-name">Assigned employee</td>
+                {properties.map((property) => <PropertyValue key={property.id}>{property.assigned_employee || "Not assigned"}</PropertyValue>)}
               </tr>
-
               <tr>
-                <td className="feature-name">Assigned Consultant</td>
-                {properties.map((p) => (
-                  <td key={p.id} className="feature-val consultant-name">
-                    {p.assigned_employee}
-                  </td>
-                ))}
-              </tr>
-
-              <tr>
-                <td className="feature-name">Direct Action</td>
-                {properties.map((p) => (
-                  <td key={p.id} className="feature-val action-cell">
+                <td className="feature-name">Visit request</td>
+                {properties.map((property) => (
+                  <PropertyValue key={property.id}>
                     <button
                       type="button"
                       className="compare-book-btn"
+                      disabled={!canRequestVisit(property)}
                       onClick={() => {
                         onClose();
-                        onBook(p.id);
+                        onBook(property.id);
                       }}
                     >
-                      Book Site Tour
+                      {canRequestVisit(property) ? "Request a visit" : "Unavailable"}
                     </button>
-                  </td>
+                  </PropertyValue>
                 ))}
               </tr>
             </tbody>
           </table>
         </div>
-      </div>
-    </div>
+      </section>
+    </dialog>
   );
 }

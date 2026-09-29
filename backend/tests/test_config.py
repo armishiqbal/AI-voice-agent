@@ -4,6 +4,11 @@ from app.core.config import Settings
 from app.integrations.providers import provider_readiness
 
 
+def test_openai_realtime_tts_is_opt_in_by_default() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.openai_realtime_tts_enabled is False
+
+
 def test_production_rejects_sqlite_and_missing_pii_key() -> None:
     with pytest.raises(ValueError, match="PostgreSQL"):
         Settings(app_env="production", database_url="sqlite:///unsafe.db", pii_encryption_key=None)
@@ -49,6 +54,46 @@ def test_trusted_proxy_setting_requires_explicit_ip_or_cidr() -> None:
 def test_upload_limit_must_be_positive() -> None:
     with pytest.raises(ValueError, match="MAX_UPLOAD_BYTES"):
         Settings(max_upload_bytes=0)
+
+
+@pytest.mark.parametrize("timeout", [0.5, 16])
+def test_stt_finalize_timeout_is_bounded(timeout: float) -> None:
+    with pytest.raises(ValueError):
+        Settings(stt_finalize_timeout_seconds=timeout)
+
+
+def test_stt_finalize_timeout_defaults_to_six_seconds() -> None:
+    assert Settings().stt_finalize_timeout_seconds == 6.0
+
+
+def test_stt_transport_timeout_is_bounded_and_defaults_to_eight_seconds() -> None:
+    assert Settings(_env_file=None).stt_transport_timeout_seconds == 8.0
+    with pytest.raises(ValueError):
+        Settings(stt_transport_timeout_seconds=0.5)
+
+
+def test_deepgram_endpointing_can_finalize_before_browser_commit() -> None:
+    assert Settings(_env_file=None).stt_endpointing_ms == 300
+
+
+def test_structured_decision_timeout_is_bounded_and_defaults_to_one_point_five_seconds() -> None:
+    assert Settings().llm_decision_timeout_seconds == 1.5
+    with pytest.raises(ValueError):
+        Settings(llm_decision_timeout_seconds=0.1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("fish_audio_model", "s2.1-pro-fre"),
+        ("fish_audio_sample_rate", 24_000),
+        ("fish_audio_latency", "ultra_low"),
+        ("fish_audio_latency", "low"),
+    ],
+)
+def test_fish_settings_reject_values_the_provider_would_not_accept(field, value) -> None:
+    with pytest.raises(ValueError):
+        Settings(**{field: value})
 
 
 def test_production_twilio_requires_complete_https_boundary() -> None:

@@ -1,8 +1,8 @@
 """Persist structured investment goals for deterministic recommendations."""
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0017_property_investment_goals"
 down_revision = "0016_conversation_tool_results"

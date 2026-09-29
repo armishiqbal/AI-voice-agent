@@ -1,41 +1,68 @@
 # Awaaz Estate: end-to-end implementation plan
 
-This plan is the source of truth for the implementation. The target is a browser-first,
-multilingual real-estate voice agent with deterministic property and appointment safety.
-Docker and n8n are intentionally out of scope: the API, worker, PostgreSQL, and external
-provider adapters run as ordinary local processes or deployable containers later.
+This plan tracks implementation and acceptance for the Week 4 capstone. The product is a
+browser-first UrduLish real-estate voice agent with deterministic property and appointment
+safety. The user deferred deployment; Docker preparation, n8n workflow artifacts, and
+deployment documentation remain in scope. Gate status below reflects the current local
+evidence, while company data, external accounts, human voice scoring, and deployment-shaped
+checks remain explicit acceptance dependencies.
 
 ## System boundary
 
 ```text
-React/Vite microphone and playback
-        │ WebSocket: JSON events + 16 kHz PCM16
+React/Vite AudioWorklet capture, conversation UI, and playback
+        │ authenticated WebSocket: JSON events + 16 kHz PCM16
         ▼
-FastAPI session endpoint (/v1/voice)
-        ├─ Deepgram streaming STT (optional live adapter)
+FastAPI session and voice services
+        ├─ OpenAI Realtime transcription/speech or Deepgram Urdu/English hybrid STT
         ├─ LangGraph guardrails, intent, grounded resolution
         │    ├─ PostgreSQL SQL facts and availability checks
-        │    ├─ Pinecone knowledge retrieval (optional live adapter)
-        │    └─ OpenAI structured decision (optional; validated before use)
+        │    ├─ Pinecone/FAISS retrieval adapters
+        │    └─ OpenAI structured decisions validated before use
         ├─ deterministic appointment service + encrypted contact data
-        └─ multilingual TTS router (required isolated open-source workers)
-             │ ordered PCM16 or compressed streaming audio chunks
+        └─ Realtime TTS with bounded HTTP tts-1 fallback
+             │ ordered PCM16 or compressed audio chunks
              ▼
         browser playback + barge-in cancellation
 
 Appointment transaction → PostgreSQL outbox → python worker.py
                                       ├─ Google Calendar (OAuth)
-                                      └─ Gmail employee notification (OAuth)
+                                      ├─ Gmail employee notification (OAuth)
+                                      └─ n8n CRM handoff (configured separately)
 ```
 
 ## Remaining end-to-end execution plan (current baseline)
 
-This section is the actionable plan from the repository's current state, not a claim that
-the system is production-ready. The latest local `python scripts/evaluation/release_report.py` run on
-2026-09-23 reports 41/41 scripted fixture conversations, 20/20 SQL-backed retrieval
-questions, and 9/9 isolated appointment cases passing. The same report marks Pinecone
-evidence false and live provider readiness false for voice, multilingual TTS, Google
-delivery, and telephony. Those local fixture results do not establish live quality.
+This is the current acceptance baseline as of 2026-09-29; it does not claim production
+readiness. The current local suite baseline (2026-09-29) reports 331 backend tests passed and
+five SQLite-only skips; the current PostgreSQL run reports 341 passed and two optional FAISS skips.
+The frontend has 63 passing tests and a successful production build, and 44/44 multi-turn fixture
+conversations pass. The hybrid Deepgram
+adapter now sends `Finalize` at each browser VAD boundary, keeps the provider WebSocket alive with
+five-second `KeepAlive` messages between turns, and sends `CloseStream` only when the voice session
+ends. Stable finalized segments are coalesced before agent processing; its focused regression,
+Python compilation, and Ruff checks pass. The latest 300 ms Deepgram endpointing run (2026-09-29)
+returned final transcripts, contextual agent replies and final audio on all three turns of one
+synthetic conversation; context retained Karachi, budget, rent and DHA. Substantive audio took
+2.06–2.71 seconds, so the two-second gate is still missed. A preceding 700 ms run timed out on all
+three turns, and earlier 300/500 ms trials were inconsistent; 300 ms is the current default based
+on the newest complete run, not a reliability or p95 claim. The two-second conversational response
+gate is not met.
+Two additional independent three-turn hybrid loopbacks (2026-09-29) completed 6/6 turns with
+contextual replies and substantive audio at 1.17–1.59 seconds. These are generated-audio samples;
+earlier slow and failed runs still prevent a reliability or p95 claim, and human/browser acceptance
+is still pending.
+Follow-up isolated runs at 100 ms and 200 ms each brought two of three synthetic answers under two
+seconds, but both lost part of the first spoken request in its final transcript; neither setting is
+safe to promote. An opt-in sentence-level TTS run at 300 ms had one transcription recovery and two
+slow turns, so the setting remains disabled and that run is not a valid TTS A/B. Keep the 300 ms
+default while continuing to improve latency without sacrificing transcript completeness.
+Synthetic speech does not verify human recognition or physical playback. The two-second route
+remains unproven as a reliable threshold.
+These samples do not establish p95, human
+quality, real-company grounding, or physical-device playback. Calendar, Gmail, and telephony
+remain unconfigured, and live property inventory is empty. See `CAPSTONE_REQUIREMENTS.md` and
+`VERIFICATION_REPORT.md` for current gate details.
 
 JEV ranked the next major workstream against the known prerequisites and selected the live
 multilingual TTS proof gate first (1.0 recommendation probability and confidence, 2026-09-23).
@@ -68,17 +95,17 @@ JEV reviewed the ASGI regression with `review` (safe-to-apply 0.64); manual revi
 covers the endpoint/middleware contract, while an actual deployment proxy remains outside local
 test coverage.
 
-Current local checks: 112 backend tests pass with three PostgreSQL-only tests skipped because no
-local server is available; the launcher/proxy target passes 4/4;
-`python scripts/evaluation/evaluate_appointments.py` passes 9/9; and a clean in-memory SQLite Alembic upgrade
-reaches migration `0021`. The CI
-preflight accepts a PostgreSQL SQLAlchemy URL, but this is only dialect-selection evidence, not a
-database connection or concurrency result. The workspace has no Git remote to dispatch the
-hosted workflow from here.
+The complete backend suite now passes against a uniquely named disposable database in the local
+PostgreSQL test container (341 passed, with two optional FAISS skips because `faiss` is not
+installed). A fresh disposable PostgreSQL database also upgraded through Alembic head revision
+`0023_lead_follow_up_enqueued`. The ARM64 Docker image builds and passes an isolated
+frontend/health smoke. The
+CI preflight still requires the remote job to select PostgreSQL; hosted CI and hosted database
+load/soak have not been run.
 
-The frontend CI job now runs its Node test suite before the production build; locally, all 8
-frontend protocol/audio tests pass and `npm run build --prefix frontend` succeeds. This adds local
-browser-client contract coverage to CI but still does not replace a real browser/device voice test.
+The frontend CI job runs its Node test suite before the production build; the current local
+suite has 63 passing tests and `npm run build --prefix frontend` succeeds. Browser loopback
+evidence uses generated audio and does not replace physical-device or human voice acceptance.
 JEV reviewed this workflow patch with a high composite (0.9365) but returned `escalate` because
 test-gap and blast-radius confidence were low; manual workflow inspection and local checks are the
 available evidence, and the hosted job remains unrun.
@@ -89,7 +116,7 @@ work; it does not prove CI behavior. A JEV review of the small patch escalated r
 approving it, so the change was retained only after manual YAML, test, dependency-install, and
 scope checks. Hosted PostgreSQL execution is still the authoritative next check.
 
-### Immediate implementation queue
+### Current remaining acceptance queue
 
 Execute these gates in order. Do not start the next dependent gate until its exit evidence
 is recorded. Work that does not depend on the TTS result may proceed in parallel only where
@@ -97,20 +124,16 @@ it does not consume or overwrite provider/model configuration.
 
 | Order | Work item | Why now | Exit evidence |
 |---|---|---|---|
-| 0 | Close the session-security gate: verify lease cleanup and trusted-proxy IP behavior; run PostgreSQL concurrency CI | Local lease/capacity regression is now deterministic and passes against an isolated test database. PostgreSQL race behavior and forwarded-client-IP trust still need deployment-shaped evidence | Focused WebSocket lifecycle tests and full suite pass; PostgreSQL concurrency CI passes; proxy tests prove only configured proxies can supply client IP |
-| 1 | Confirm launch language/script matrix, inference hardware, licensing, and budget; install one candidate model in an isolated TTS service and run smoke generation | The worker is contract-tested but has never loaded weights; language quality and runtime fit are unknown | Approved matrix and hardware record; model/version/license record; successful warmup; per-language/script samples; measured cold/warm latency, memory, and disk |
-| 2 | Run native-speaker multilingual TTS evaluation and select supported routing/fallback behavior | A configured route is not proof that the model pronounces it well; Roman Urdu and code-switching require their own evidence | Scored rubric by language/script, explicit supported/unsupported matrix, approved candidate, and documented fallback/refusal behavior |
-| 3 | Complete a live browser voice vertical slice using the TTS route that passed evaluation | Validates codecs, event lifecycle, STT-to-first-audio latency, interruption, and provider degradation end to end | Browser/device report, live provider trace, latency percentiles, barge-in timing, and tested failure recovery |
-| 4 | Validate PostgreSQL migrations/concurrency; import owner-approved inventory and ingest approved knowledge | SQL and retrieval must be proven against production-shaped rather than fixture data | Clean migration/restore/concurrency evidence, reconciled import, versioned index, and non-fixture RAG report |
-| 5 | Exercise real Google test-account Calendar/Gmail delivery and outbox recovery | Local handlers do not prove OAuth refresh, provider delivery, or duplicate behavior | Test-account booking lifecycle, retry/restart/reconciliation evidence, and no duplicate side effects |
-| 6 | Complete security/privacy/operations review and deploy staging | Public endpoints and external credentials need deployment-shaped controls before real calls | Threat-model signoff, retention/key-rotation/restore evidence, alerts, secrets, and staging rollback drill |
-| 7 | Enable inbound telephony and run controlled pilot only after all prior gates | Phone calling introduces carrier, consent, signature, codec, and operational risks | Signed inbound test-call evidence, approved consent policy, pilot go/no-go, and rollback owner |
+| 1 | Import owner-approved property inventory, brochures/FAQs, and staff assignments | The live database currently has zero properties; the app must not fabricate listings | Reconciled real import, approved knowledge index, and non-fixture retrieval/grounding evaluation |
+| 2 | Exercise Google Calendar/Gmail, n8n, and CRM integrations with authorized test accounts | Local contracts/outbox do not prove OAuth, delivery, retries, or duplicate prevention | End-to-end booking/reschedule/cancel lifecycle and committed provider/CRM delivery evidence |
+| 3 | Complete consented human voice acceptance | Generated audio does not establish UrduLish naturalness, actual device capture/playback, or latency percentiles | Native-speaker rubric scores, physical-microphone/playback transcript and reply, interruption recovery, and measured p95 |
+| 4 | Execute remote CI and hosted PostgreSQL load/soak after the local release gates | Full local PostgreSQL suite (341 passed, 2 optional FAISS skips), fresh PostgreSQL upgrade to Alembic head, ARM64 image build, and isolated container health smoke now pass; remote CI and hosted contention are not available in this local run | Executed CI result and hosted contention/soak evidence |
+| 5 | Deploy backend, database, vector service, monitoring, workflows, and inbound telephony | Deployment is explicitly deferred by the user and depends on public TLS, operator credentials, and the preceding acceptance gates | Staging and controlled inbound-call evidence after authorization to deploy |
 
-Blocking inputs for work item 1 are an approved language/script matrix, a target inference
-machine (CPU/GPU and available memory/disk), Hugging Face access/token if the selected
-checkpoint is gated, and license approval. Do not download multi-gigabyte weights or accept
-model terms automatically. Existing Docker files remain untouched; the TTS worker is an
-ordinary separate process during local development. No n8n is part of this plan.
+The first three acceptance gates require approved company data, authorized external test
+accounts, and consented human reviewers. No real listings, email recipients, calendar events,
+or CRM records are invented to fill those gaps. Deployment remains deferred; deployment
+preparation and reproducible local verification continue.
 
 ### Phase 0 — Lock the product and release contract
 
@@ -202,17 +225,34 @@ ordinary separate process during local development. No n8n is part of this plan.
   audio from leaking into the next turn.
 - Stream the first useful TTS segment as soon as safe text is available; measure each
   stage separately (audio end → final transcript → decision → first audio), not just a
-  single aggregate number. The implemented `voice.end_of_turn_to_first_audio_ms` currently
-  starts at final-transcript/text receipt, not a microphone-level acoustic endpoint; add a
-  client/VAD timestamp if the SLO requires that exact boundary. Define whether the two-second
-  P95 target is achievable on the chosen local hardware; report failed samples and concurrency,
-  not only averages.
+  single aggregate number. The implemented `voice.final_transcript_to_first_audio_ms` starts at
+  final-transcript/text receipt and ends at the first substantive answer audio chunk; it excludes
+  the separately prepared acknowledgement segment and does not start at the microphone-level
+  acoustic endpoint. `voice.vad_end_to_acknowledgement_audio_ms` starts when the VAD-end event
+  reaches the API and ends when its first acknowledgement chunk is sent; it does not measure
+  browser playback. An earlier three-turn paced synthetic UrduLish hybrid sample delivered
+  acknowledgement audio in 440–442 ms and substantive answer audio in 1,237–2,399 ms from the
+  last voice frame. Two of three samples were under two seconds; one slower Deepgram final transcript
+  left its answer over target. This historical sample is superseded by the latest repeat runs
+  summarized below. It is too small to establish a percentile or acceptance. Define whether the
+  two-second P95 target is achievable on the
+  chosen local hardware; report failed samples and concurrency, not only averages.
 - Deliver: browser-to-agent-to-browser live call report, device/browser matrix, latency
   distributions, interruption results, provider/degraded-mode behavior, and operator-visible
   session diagnostics.
 - Gate: no fabricated audio; failed STT/LLM/TTS produces a clear recovery or handoff path;
   p95 first-audio and barge-in limits pass under agreed load; native reviewers approve
   the required language mix.
+
+An earlier explicit-finalize experiment disabled Deepgram endpointing and sometimes returned only
+interim text. A later per-turn `CloseStream` change proved brittle: it closed the provider socket
+on each utterance, forcing a reconnect at the next turn and producing intermittent finalize
+timeouts. The current implementation retains endpointing, uses `Finalize` to flush each committed
+turn without closing the conversation socket, sends `KeepAlive` during pauses, and closes the
+socket at session end. The latest synthetic three-turn session returned all replies and audio, but
+one transcript missed DHA and one substantive answer was just over two seconds. These samples do
+not establish stable latency, human-language quality or physical playback; see
+`VERIFICATION_REPORT.md` and its artifacts.
 
 ### Phase 3 — Replace fixture-only proof with production data and grounded retrieval
 
@@ -345,7 +385,8 @@ ordinary separate process during local development. No n8n is part of this plan.
 1. **Foundation — complete locally**
    - Layered `backend/app` modules, settings from environment, SQLite development bootstrap.
    - PostgreSQL-compatible SQLAlchemy models and Alembic migrations through
-     `0021_voice_session_leases` (PostgreSQL CI must still verify this migration and its concurrency behavior).
+     `0022_property_source_unverified` (SQLite migration passes; PostgreSQL CI must still
+     verify this migration and concurrency behavior).
    - `python run.py` starts the API; `/healthz`, `/readyz`, OpenAPI, and CORS are available.
 
 2. **Property intelligence — SQL and validated file ingestion implemented**
@@ -445,8 +486,10 @@ python run.py                 # API: http://localhost:8000
 python worker.py              # appointment outbox in a second terminal
 npm install --prefix frontend
 npm run dev --prefix frontend  # browser console: http://localhost:5173
-python -m pytest backend/tests
-python -m ruff check backend/app backend/tests scripts
+cd backend
+PYTHONPATH=.. python -m pytest -q -ra
+python -m ruff check app tests
+cd ..
 python scripts/evaluation/evaluate_appointments.py
 ```
 

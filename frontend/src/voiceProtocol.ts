@@ -2,6 +2,7 @@ export type AgentDecision = {
   kind: string;
   spoken_text: string;
   property_ids?: string[];
+  reason?: string | null;
 };
 
 export type AcousticEmotion = {
@@ -23,6 +24,7 @@ export type ServerEvent = {
   confidence?: number | null;
   is_final?: boolean;
   speech_final?: boolean;
+  acknowledgement?: boolean;
   audio_base64?: string;
   encoding?: string;
   sample_rate?: number;
@@ -33,6 +35,8 @@ export type ServerEvent = {
   voice_mode?: string;
   message?: string;
   reason?: string;
+  reasoning_status?: "unconfigured" | "configured_unverified" | "cooldown" | "provider_error";
+  reasoning_failure_category?: "rate_limited" | "authentication_failed" | "timeout" | "invalid_response" | "provider_error" | null;
   ready?: boolean;
   property_id?: string;
   slots?: string[];
@@ -56,6 +60,24 @@ function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
 }
 
+function isOptionalReasoningStatus(value: unknown): value is ServerEvent["reasoning_status"] {
+  return value === undefined
+    || value === "unconfigured"
+    || value === "configured_unverified"
+    || value === "cooldown"
+    || value === "provider_error";
+}
+
+function isOptionalReasoningFailureCategory(value: unknown): value is ServerEvent["reasoning_failure_category"] {
+  return value === undefined
+    || value === null
+    || value === "rate_limited"
+    || value === "authentication_failed"
+    || value === "timeout"
+    || value === "invalid_response"
+    || value === "provider_error";
+}
+
 function isOptionalBoolean(value: unknown): boolean {
   return value === undefined || typeof value === "boolean";
 }
@@ -65,6 +87,9 @@ function isAudioDecision(value: unknown): value is AgentDecision {
     return false;
   }
   if (value.spoken_text.length > 2_000) return false;
+  if (value.reason !== undefined && value.reason !== null && typeof value.reason !== "string") {
+    return false;
+  }
   return value.property_ids === undefined
     || (Array.isArray(value.property_ids)
       && value.property_ids.length <= 20
@@ -109,7 +134,11 @@ export function parseServerEvent(data: unknown): ServerEvent | null {
         ? value as ServerEvent
         : null;
     case "agent_response":
-      return isAudioDecision(value.decision) ? value as ServerEvent : null;
+      return isAudioDecision(value.decision)
+        && isOptionalReasoningStatus(value.reasoning_status)
+        && isOptionalReasoningFailureCategory(value.reasoning_failure_category)
+        ? value as ServerEvent
+        : null;
     case "audio_chunk":
       return isPcmOrMpegBase64(value.audio_base64)
         && (value.encoding === "pcm_s16le" || value.encoding === "audio/mpeg")
@@ -117,6 +146,7 @@ export function parseServerEvent(data: unknown): ServerEvent | null {
         && Number.isInteger(value.sample_rate)
         && value.sample_rate >= 8_000
         && value.sample_rate <= 96_000
+        && isOptionalBoolean(value.acknowledgement)
         && isOptionalBoolean(value.is_final)
         ? value as ServerEvent
         : null;

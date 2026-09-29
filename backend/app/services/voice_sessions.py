@@ -110,7 +110,7 @@ class VoiceSessionService:
         self, client_address: str, origin: str, mode: str = "standard"
     ) -> tuple[str, datetime] | None:
         """Return a bearer ticket unless the shared per-client issue limit is exhausted."""
-        if not client_address or not origin or mode not in {"standard", "openai"}:
+        if not client_address or not origin or mode not in {"standard", "openai", "hybrid"}:
             return None
         norm_origin = self._normalize_origin(origin)
         now = datetime.now(UTC)
@@ -172,7 +172,7 @@ class VoiceSessionService:
     def mode_for_ticket(raw_token: str) -> str | None:
         """Read provider choice from an opaque ticket after consume() has validated it."""
         mode, separator, _secret = raw_token.partition(".")
-        return mode if separator and mode in {"standard", "openai"} else None
+        return mode if separator and mode in {"standard", "openai", "hybrid"} else None
 
     def consume(
         self, raw_token: str, client_address: str, origin: str

@@ -34,6 +34,9 @@ def load_rag_cases(path: Path) -> list[RAGCase]:
 
 def run_sql_baseline(repository: object, cases: list[RAGCase]) -> dict[str, object]:
     results = []
+    grounded_reference_count = 0
+    property_reference_count = 0
+    hallucination_case_count = 0
     for case in cases:
         matches = [
             item
@@ -44,28 +47,51 @@ def run_sql_baseline(repository: object, cases: list[RAGCase]) -> dict[str, obje
             )
             if item.available
         ]
-        actual = [item.id for item in matches[:3]]
+        returned_matches = matches[:3]
+        actual = [item.id for item in returned_matches]
+        grounded_ids = [item.id for item in returned_matches if item.available]
         expected = case.expected_property_ids
+        property_reference_count += len(actual)
+        grounded_reference_count += len(grounded_ids)
+        hallucination = any(property_id not in expected for property_id in actual)
+        hallucination_case_count += int(hallucination)
         results.append(
             {
                 "id": case.case_id,
                 "expected": expected,
                 "actual": actual,
+                "grounded_property_ids": grounded_ids,
+                "ungrounded_property_ids": [
+                    property_id for property_id in actual if property_id not in grounded_ids
+                ],
                 "passed": actual == expected[:3],
+                "property_id_hallucination": hallucination,
             }
         )
     passed = sum(1 for item in results if item["passed"])
-    hallucinations = sum(
-        1
-        for item in results
-        if any(property_id not in item["expected"] for property_id in item["actual"])
-    )
+    query_count = len(results)
+    retrieval_accuracy = round(passed / query_count, 4) if query_count else 0.0
     return {
         "mode": "sql-grounded-fixtures",
         "pinecone_evidence": False,
-        "total": len(results),
+        "metrics_scope": "SQL fixture property references; not free-form claim entailment",
+        "total": query_count,
         "passed": passed,
-        "accuracy": round(passed / len(results), 4) if results else 0.0,
-        "hallucination_rate": round(hallucinations / len(results), 4) if results else 0.0,
+        "accuracy": retrieval_accuracy,
+        "retrieval_accuracy": retrieval_accuracy,
+        "grounding_rate": (
+            round(grounded_reference_count / property_reference_count, 4)
+            if property_reference_count
+            else 0.0
+        ),
+        "hallucination_rate": (
+            round(hallucination_case_count / query_count, 4) if query_count else 0.0
+        ),
+        "denominators": {
+            "queries": query_count,
+            "returned_property_references": property_reference_count,
+            "grounded_property_references": grounded_reference_count,
+            "queries_with_unexpected_property_ids": hallucination_case_count,
+        },
         "results": results,
     }

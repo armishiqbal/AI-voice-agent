@@ -1,4 +1,6 @@
 import React, { useState } from "react";
+import { calculateInstallment } from "./financingMath.mjs";
+import { useNativeDialog } from "./useNativeDialog";
 
 type Property = {
   id: string;
@@ -6,12 +8,7 @@ type Property = {
   city: string;
   area: string;
   price_pkr: number;
-  bedrooms: number;
-  size_sqft: number;
-  purpose: string;
-  amenities: string[];
-  payment_plan: string;
-  assigned_employee: string;
+  available: boolean;
 };
 
 type MortgageCalculatorModalProps = {
@@ -33,91 +30,72 @@ function formatPricePKR(price: number): string {
 }
 
 export function MortgageCalculatorModal({ property, onClose, onBookConsultation }: MortgageCalculatorModalProps) {
-  const initialPrice = property?.price_pkr || 25_000_000;
-  const [price, setPrice] = useState<number>(initialPrice);
+  const dialogRef = useNativeDialog(true);
+  const [price, setPrice] = useState<number>(property?.price_pkr ?? 0);
   const [downPaymentPct, setDownPaymentPct] = useState<number>(25);
   const [tenureYears, setTenureYears] = useState<number>(5);
-  const [isRDA, setIsRDA] = useState<boolean>(false);
-  const [interestRate, setInterestRate] = useState<number>(14.5);
-  const [isFiler, setIsFiler] = useState<boolean>(true);
+  const [annualRate, setAnnualRate] = useState<number>(14.5);
 
-  // Roshan Apna Ghar subsidized rate calculation
-  const effectiveRate = isRDA ? Math.min(interestRate, 12.5) : interestRate;
-
-  const downPaymentAmount = (price * downPaymentPct) / 100;
-  const loanPrincipal = price - downPaymentAmount;
-
-  const monthlyRate = effectiveRate / 100 / 12;
-  const totalMonths = tenureYears * 12;
-
-  let monthlyInstallment = 0;
-  if (monthlyRate > 0 && totalMonths > 0) {
-    monthlyInstallment =
-      (loanPrincipal * monthlyRate * Math.pow(1 + monthlyRate, totalMonths)) /
-      (Math.pow(1 + monthlyRate, totalMonths) - 1);
-  } else if (totalMonths > 0) {
-    monthlyInstallment = loanPrincipal / totalMonths;
-  }
-
-  const totalRepayment = monthlyInstallment * totalMonths;
-  const totalInterest = Math.max(0, totalRepayment - loanPrincipal);
-
-  // FBR Section 236K Advance Tax on Purchase
-  const fbrTaxRate = isFiler ? 0.03 : price > 100_000_000 ? 0.15 : 0.105;
-  const fbrTaxAmount = price * fbrTaxRate;
+  const estimate = calculateInstallment(price, downPaymentPct, tenureYears, annualRate);
+  const { downPaymentAmount, loanPrincipal, monthlyInstallment, totalInterest, totalMonths, totalPaid } = estimate;
 
   return (
-    <div className="orbit-modal-backdrop" onClick={onClose} role="dialog" aria-modal="true" aria-label="Mortgage & Financing Calculator">
-      <div className="mortgage-calc-window" onClick={(e) => e.stopPropagation()}>
-        <div className="calc-header">
+    <dialog
+      ref={dialogRef}
+      className="orbit-native-modal"
+      aria-labelledby="installment-estimate-title"
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
+      <section className="mortgage-calc-window">
+        <header className="calc-header">
           <div className="calc-header-title">
-            <span className="calc-accent-pill">FINANCE HUD</span>
+                <span className="calc-accent-pill">ESTIMATE</span>
             <div>
-              <h3>Pakistani Real Estate Mortgage & Installment Calculator</h3>
-              <span className="calc-subtext">SBP KIBOR + Bank Spread & Roshan Digital Account (RDA)</span>
+              <h3 id="installment-estimate-title">Monthly installment estimate</h3>
+              <span className="calc-subtext">Calculated from the property price and assumptions below.</span>
             </div>
           </div>
-          <button type="button" className="calc-close-btn" onClick={onClose} aria-label="Close Calculator">✕</button>
-        </div>
+          <button type="button" className="calc-close-btn" onClick={onClose} aria-label="Close calculator">×</button>
+        </header>
 
         <div className="calc-body-grid">
-          {/* Inputs Section */}
           <div className="calc-inputs-col">
             {property && (
               <div className="calc-selected-prop-card">
                 <span className="prop-badge">{property.id}</span>
                 <span className="prop-name">{property.title}</span>
                 <span className="prop-geo">{property.area}, {property.city}</span>
+                {!property.available && <span className="availability-badge unavailable">Unavailable</span>}
               </div>
             )}
 
             <div className="calc-form-group">
-              <label>Property Value (PKR)</label>
+              <label htmlFor="calc-property-price">Property price (PKR)</label>
               <div className="calc-input-row">
                 <input
+                  id="calc-property-price"
                   type="number"
                   className="calc-text-input"
-                  value={price}
-                  onChange={(e) => setPrice(Math.max(100_000, Number(e.target.value) || 0))}
+                  min="0"
+                  max="5000000000"
+                  value={price || ""}
+                  onChange={(event) => setPrice(Math.max(0, Number(event.target.value) || 0))}
                   step="500000"
+                  placeholder="Enter a property price"
                 />
-                <span className="calc-formatted-preview">{formatPricePKR(price)}</span>
+                {price > 0 && <span className="calc-formatted-preview">{formatPricePKR(price)}</span>}
               </div>
             </div>
 
             <div className="calc-form-group">
               <div className="label-row">
-                <label>Down Payment ({downPaymentPct}%)</label>
-                <span className="highlight-val">{formatPricePKR(downPaymentAmount)}</span>
+                <label>Down payment ({downPaymentPct}%)</label>
+                {price > 0 && <span className="highlight-val">{formatPricePKR(downPaymentAmount)}</span>}
               </div>
               <div className="pct-btn-group">
                 {[15, 20, 25, 30, 40, 50].map((pct) => (
-                  <button
-                    key={pct}
-                    type="button"
-                    className={`pct-btn ${downPaymentPct === pct ? "active" : ""}`}
-                    onClick={() => setDownPaymentPct(pct)}
-                  >
+                  <button key={pct} type="button" className={`pct-btn ${downPaymentPct === pct ? "active" : ""}`} onClick={() => setDownPaymentPct(pct)}>
                     {pct}%
                   </button>
                 ))}
@@ -126,18 +104,13 @@ export function MortgageCalculatorModal({ property, onClose, onBookConsultation 
 
             <div className="calc-form-group">
               <div className="label-row">
-                <label>Financing Tenure ({tenureYears} Years)</label>
-                <span className="highlight-val">{tenureYears * 12} Monthly Installments</span>
+                <label>Financing tenure ({tenureYears} years)</label>
+                <span className="highlight-val">{totalMonths} installments</span>
               </div>
               <div className="pct-btn-group">
-                {[3, 5, 7, 10, 15, 20].map((yrs) => (
-                  <button
-                    key={yrs}
-                    type="button"
-                    className={`pct-btn ${tenureYears === yrs ? "active" : ""}`}
-                    onClick={() => setTenureYears(yrs)}
-                  >
-                    {yrs} Yrs
+                {[3, 5, 7, 10, 15, 20].map((years) => (
+                  <button key={years} type="button" className={`pct-btn ${tenureYears === years ? "active" : ""}`} onClick={() => setTenureYears(years)}>
+                    {years} yrs
                   </button>
                 ))}
               </div>
@@ -145,85 +118,59 @@ export function MortgageCalculatorModal({ property, onClose, onBookConsultation 
 
             <div className="calc-form-group">
               <div className="label-row">
-                <label>Annual Markup / KIBOR Rate ({effectiveRate.toFixed(1)}%)</label>
-                {isRDA && <span className="rda-tag">RDA SUBSIDY APPLIED</span>}
+                <label htmlFor="calc-annual-rate">Assumed annual rate ({annualRate.toFixed(1)}%)</label>
+                <span className="rda-tag">EDITABLE</span>
               </div>
               <input
+                id="calc-annual-rate"
                 type="range"
                 className="calc-range-slider"
-                min="10.0"
-                max="22.0"
+                min="0.5"
+                max="30"
                 step="0.5"
-                value={interestRate}
-                onChange={(e) => setInterestRate(parseFloat(e.target.value))}
+                value={annualRate}
+                onChange={(event) => setAnnualRate(Number(event.target.value))}
               />
-            </div>
-
-            <div className="calc-toggle-row">
-              <label className="toggle-label">
-                <input
-                  type="checkbox"
-                  checked={isRDA}
-                  onChange={(e) => setIsRDA(e.target.checked)}
-                />
-                <span>Roshan Digital Account (Overseas Pakistani Scheme)</span>
-              </label>
-
-              <label className="toggle-label">
-                <input
-                  type="checkbox"
-                  checked={isFiler}
-                  onChange={(e) => setIsFiler(e.target.checked)}
-                />
-                <span>Active FBR Tax Filer (ATL Verified)</span>
-              </label>
             </div>
           </div>
 
-          {/* Results Summary Card */}
           <div className="calc-results-col">
             <div className="calc-summary-hero">
               <span className="hero-sub">ESTIMATED MONTHLY INSTALLMENT</span>
-              <div className="hero-amount">{formatPricePKR(monthlyInstallment)} <span className="per-mo">/ month</span></div>
-              <span className="hero-duration">For {totalMonths} consecutive months</span>
+              <div className="hero-amount">
+                {price > 0 ? formatPricePKR(monthlyInstallment) : "Enter a price"}
+                {price > 0 && <span className="per-mo"> / month</span>}
+              </div>
+              {price > 0 && <span className="hero-duration">For {totalMonths} monthly installments</span>}
             </div>
 
-            <div className="calc-metrics-stack">
-              <div className="calc-metric-row">
-                <span className="metric-name">Down Payment Required</span>
-                <span className="metric-val">{formatPricePKR(downPaymentAmount)}</span>
+            {price > 0 ? (
+              <div className="calc-metrics-stack">
+                <div className="calc-metric-row"><span className="metric-name">Down payment</span><span className="metric-val">{formatPricePKR(downPaymentAmount)}</span></div>
+                <div className="calc-metric-row"><span className="metric-name">Financed principal</span><span className="metric-val">{formatPricePKR(loanPrincipal)}</span></div>
+                <div className="calc-metric-row"><span className="metric-name">Estimated interest</span><span className="metric-val mark-val">{formatPricePKR(totalInterest)}</span></div>
+                <div className="calc-metric-row total-row"><span className="metric-name">Estimated total paid</span><span className="metric-val total-val">{formatPricePKR(totalPaid)}</span></div>
               </div>
-              <div className="calc-metric-row">
-                <span className="metric-name">Bank Financed Principal</span>
-                <span className="metric-val">{formatPricePKR(loanPrincipal)}</span>
-              </div>
-              <div className="calc-metric-row">
-                <span className="metric-name">Total Markup / Bank Profit</span>
-                <span className="metric-val mark-val">{formatPricePKR(totalInterest)}</span>
-              </div>
-              <div className="calc-metric-row">
-                <span className="metric-name">FBR Section 236K Tax ({isFiler ? "Filer 3%" : "Non-Filer 10.5%"})</span>
-                <span className="metric-val tax-val">{formatPricePKR(fbrTaxAmount)}</span>
-              </div>
-              <div className="calc-metric-row total-row">
-                <span className="metric-name">Total Acquisition Outlay</span>
-                <span className="metric-val total-val">{formatPricePKR(downPaymentAmount + totalRepayment + fbrTaxAmount)}</span>
-              </div>
-            </div>
+            ) : (
+              <p className="calc-empty-hint">Enter a listing price, or open this calculator from a property card.</p>
+            )}
 
+            <p className="calc-disclaimer">Estimate only. Actual bank rates, fees, taxes, eligibility, and payment schedules must be confirmed with the lender and relevant authorities.</p>
             <button
               type="button"
               className="calc-consult-action"
+              disabled={!property?.available}
               onClick={() => {
+                if (!property?.available) return;
                 onClose();
-                onBookConsultation(property?.id);
+                onBookConsultation(property.id);
               }}
             >
-              Book Advisory Consultation with Verified Broker
+              {property?.available ? "Request a visit for this listing" : "Select an available listing to request a visit"}
             </button>
           </div>
         </div>
-      </div>
-    </div>
+      </section>
+    </dialog>
   );
 }

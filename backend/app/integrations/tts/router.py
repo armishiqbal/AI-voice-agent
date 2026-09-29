@@ -188,6 +188,33 @@ class TTSRouter:
         self.fallback = fallback
         self.voices = voices or {}
 
+    async def aclose(self) -> None:
+        """Close providers that own pooled resources, once per provider instance."""
+        providers = {id(provider): provider for provider in self.providers.values()}
+        if self.fallback is not None:
+            providers[id(self.fallback)] = self.fallback
+        close_calls = []
+        for provider in providers.values():
+            close = getattr(provider, "aclose", None)
+            if close is not None:
+                close_calls.append(close())
+        if close_calls:
+            await asyncio.gather(*close_calls)
+
+    async def warmup(self) -> bool:
+        """Warm each unique provider that supports transport setup; failures are non-fatal."""
+        providers = {id(provider): provider for provider in self.providers.values()}
+        if self.fallback is not None:
+            providers[id(self.fallback)] = self.fallback
+        warmups = [getattr(provider, "warmup", None) for provider in providers.values()]
+        callable_warmups = [warmup for warmup in warmups if callable(warmup)]
+        if not callable_warmups:
+            return False
+        results = await asyncio.gather(
+            *(warmup() for warmup in callable_warmups), return_exceptions=True
+        )
+        return all(result is True for result in results)
+
     async def synthesize_stream(
         self, text: str, preferred_language: str | None = None
     ) -> AsyncIterator[AudioChunk]:
@@ -230,21 +257,26 @@ class TTSRouter:
                         is_final=False,
                     )
                     sequence += 1
-            except TTSProviderError:
+            except TTSProviderError as primary_error:
                 if provider is self.fallback or self.fallback is None:
                     raise
-                async for chunk in self.fallback.synthesize_stream(segment, language, voice_id):
-                    last_sample_rate = chunk.sample_rate
-                    last_encoding = chunk.encoding
-                    yield AudioChunk(
-                        sequence=sequence,
-                        audio=chunk.audio,
-                        language=language,
-                        sample_rate=chunk.sample_rate,
-                        encoding=chunk.encoding,
-                        is_final=False,
-                    )
-                    sequence += 1
+                try:
+                    async for chunk in self.fallback.synthesize_stream(segment, language, voice_id):
+                        last_sample_rate = chunk.sample_rate
+                        last_encoding = chunk.encoding
+                        yield AudioChunk(
+                            sequence=sequence,
+                            audio=chunk.audio,
+                            language=language,
+                            sample_rate=chunk.sample_rate,
+                            encoding=chunk.encoding,
+                            is_final=False,
+                        )
+                        sequence += 1
+                except TTSProviderError as fallback_error:
+                    # Keep the safe fallback error visible while preserving the primary cause
+                    # for server-side classification (for example, provider quota exhaustion).
+                    raise fallback_error from primary_error
         if sequence:
             yield AudioChunk(
                 sequence=sequence,

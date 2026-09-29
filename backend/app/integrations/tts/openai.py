@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from os import getenv
+from time import monotonic
+from urllib.parse import quote
 
 import httpx
 
@@ -25,6 +28,47 @@ class OpenAISpeechProvider:
         self.model = model
         self.voice = voice
         self.timeout_seconds = timeout_seconds
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+        self._warmup_lock = asyncio.Lock()
+        self._warmed_at: float | None = None
+
+    async def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            async with self._client_lock:
+                if self._client is None:
+                    self._client = httpx.AsyncClient(
+                        timeout=self.timeout_seconds,
+                        limits=httpx.Limits(keepalive_expiry=120.0),
+                    )
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the pooled HTTP connection during application shutdown."""
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
+
+    async def warmup(self) -> bool:
+        """Warm the same keep-alive pool used by speech, without generating audio."""
+        if not self.api_key:
+            return False
+        async with self._warmup_lock:
+            now = monotonic()
+            if self._warmed_at is not None and now - self._warmed_at < 60:
+                return True
+            client = await self._http_client()
+            try:
+                response = await client.get(
+                    f"https://api.openai.com/v1/models/{quote(self.model, safe='')}",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+            except httpx.HTTPError:
+                return False
+            if response.status_code >= 400:
+                return False
+            self._warmed_at = monotonic()
+            return True
 
     async def is_ready(self) -> bool:
         return bool(self.api_key)
@@ -48,30 +92,47 @@ class OpenAISpeechProvider:
             "Avoid exaggerated sales delivery. Read only the supplied words."
         )
         normalized_text = apply_phonetic_transliteration(text)
+        legacy_streaming_model = self.model in {"tts-1", "tts-1-hd"}
         payload = {
             "model": self.model,
             "voice": voice,
             "input": normalized_text,
-            "instructions": instructions,
-            "response_format": "pcm",
+            "response_format": "mp3" if legacy_streaming_model else "pcm",
             "stream_format": "audio",
         }
+        if not legacy_streaming_model:
+            payload["instructions"] = instructions
         try:
-            async with (
-                httpx.AsyncClient(timeout=self.timeout_seconds) as client,
-                client.stream(
-                    "POST",
-                    "https://api.openai.com/v1/audio/speech",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=payload,
-                ) as response,
-            ):
+            client = await self._http_client()
+            async with client.stream(
+                "POST",
+                "https://api.openai.com/v1/audio/speech",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+            ) as response:
                 if response.status_code >= 400:
                     # Avoid retaining or surfacing provider response bodies that can contain
                     # request details; the UI receives a stable, non-sensitive failure.
                     raise TTSProviderError(
                         f"OpenAI speech request failed with HTTP {response.status_code}"
                     )
+                if legacy_streaming_model:
+                    sequence = 0
+                    async for part in response.aiter_bytes():
+                        if not part:
+                            continue
+                        yield AudioChunk(
+                            sequence=sequence,
+                            audio=part,
+                            language=language,
+                            sample_rate=24_000,
+                            encoding="audio/mpeg",
+                        )
+                        sequence += 1
+                    if sequence == 0:
+                        raise TTSProviderError("OpenAI speech returned no audio")
+                    return
+
                 pending = bytearray()
                 sequence = 0
                 # Yield complete PCM samples as network bytes arrive. Asking httpx for an

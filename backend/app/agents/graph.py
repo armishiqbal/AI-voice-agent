@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TypedDict
@@ -28,6 +29,16 @@ INJECTION_PATTERNS = (
     "internal company data",
     "book fake",
 )
+
+
+def _normalize_voice_text(text: str) -> str:
+    """Normalize Arabic-script marks that STT may add around Urdu loanwords."""
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    return "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character) and character != "\u0640"
+    )
 
 
 @dataclass
@@ -219,29 +230,100 @@ class EstateAgent:
 
     @staticmethod
     def _intent(text: str) -> Intent:
-        value = text.lower()
+        value = _normalize_voice_text(text)
         if any(word in value for word in ("cancel", "radd", "cancel kar", "mansookh", "nahi chahiye visit")):
             return Intent.CANCEL
         if any(word in value for word in ("reschedule", "change time", "time change", "waqt badalna", "doosra time")):
             return Intent.RESCHEDULE
         if any(word in value for word in ("book", "visit", "appointment", "booking", "dekhna", "dekhne jana", "visit karna", "ayesha ke saath")):
             return Intent.BOOK
-        if any(word in value for word in ("sell", "bech", "bechna", "listing", "list karni", "list my property")):
+        # A listing is an object being searched for; it does not imply that the caller
+        # wants to sell. Require an explicit seller action to avoid routing buyer/renter
+        # requests such as "show me available listings" to human seller intake.
+        if any(
+            phrase in value
+            for phrase in (
+                "sell my",
+                "sell a property",
+                "sell the property",
+                "selling my",
+                "selling a property",
+                "list my property",
+                "list my house",
+                "list my apartment",
+                "seller listing",
+                "my listing",
+                "put my property on the market",
+                "bechna hai",
+                "bechni hai",
+                "bechna chahta",
+                "bechna chahti",
+                "bech raha",
+                "bech rahi",
+                "property bech",
+                "ghar bech",
+            )
+        ) or re.search(r"\bsell\b", value):
             return Intent.SELL
         if any(word in value for word in ("investment", "invest ", "rental yield", "passive income")):
             return Intent.INVEST
-        if any(word in value for word in ("rent", "kiraya", "kiraye", "kiraaye", "rental", "rent pe", "rent par", "rent ka", "monthly rent")):
+        if any(
+            word in value
+            for word in (
+                # Deepgram Urdu can render the spoken English "rent" as these
+                # phonetic spellings in mixed-script UrduLish transcripts.
+                "rent", "riend", "رینٹ", "رینت", "رنت", "رنٹ", "وینٹ", "kiraya", "kiraye", "kiraaye", "rental", "rent pe", "rent par",
+                "rent ka", "monthly rent", "रेंट", "किराया", "किराए", "किराये",
+                "کرایہ", "کرائے", "کرایے",
+            )
+        ):
             return Intent.RENT
         if any(word in value for word in ("commercial", "office", "shop", "dukan", "dukaan", "plaza", "warehouse", "godam")):
             return Intent.COMMERCIAL
         if any(word in value for word in ("invest", "investment", "roi", "passive income", "yield", "sarmayakari", "munafa")):
             return Intent.INVEST
-        if any(word in value for word in ("buy", "kharid", "khareed", "purchase", "plot", "flat", "flats", "house", "houses", "makan", "makaan", "kothi", "bangla", "villa", "villas", "bungalow", "apartment", "apartments", "zameen", "file")):
+        if any(word in value for word in ("buy", "kharid", "khareed", "खरीद", "खरीदना", "خرید", "خریدنا", "purchase", "plot", "flat", "flats", "home", "homes", "house", "houses", "makan", "makaan", "kothi", "bangla", "villa", "villas", "bungalow", "apartment", "apartments", "zameen", "file")) or any(
+            phrase in value
+            for phrase in (
+                "available property",
+                "find a property",
+                "find an available property",
+                "looking for a property",
+                "property options",
+                "property in ",
+                "property under ",
+            )
+        ):
             return Intent.BUY
         return Intent.UNKNOWN
 
     @staticmethod
     def _extract_budget(lowered: str) -> int | None:
+        spoken_numbers = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+            "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+            "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+            "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40,
+            "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80,
+            "ninety": 90, "gyarah": 11, "giyarah": 11, "barah": 12,
+            "terah": 13, "chaudah": 14, "choudah": 14, "pandrah": 15,
+            "solah": 16, "satrah": 17, "atharah": 18, "unnis": 19,
+            "bees": 20, "tees": 30, "chalees": 40, "pachaas": 50,
+            "pachas": 50, "saath": 60, "sattar": 70, "assi": 80, "nabbe": 90,
+            "ek": 1, "aik": 1, "do": 2, "teen": 3,
+            "char": 4, "chaar": 4, "paanch": 5, "panch": 5,
+            # Common Nova-3 UrduLish rendering of spoken "paanch".
+            "paunch": 5, "das": 10,
+            "एक": 1, "दो": 2, "तीन": 3, "चार": 4, "पाँच": 5, "पांच": 5,
+            "छह": 6, "छः": 6, "सात": 7, "आठ": 8, "नौ": 9, "दस": 10,
+            "ایک": 1, "دو": 2, "تین": 3, "چار": 4, "پانچ": 5,
+            "چھ": 6, "سات": 7, "آٹھ": 8, "نو": 9, "دس": 10,
+            "گیارہ": 11, "بارہ": 12, "تیرہ": 13, "چودہ": 14, "پندرہ": 15,
+            "سولہ": 16, "سترہ": 17, "اٹھارہ": 18, "انیس": 19, "بیس": 20,
+            "تیس": 30, "چالیس": 40, "پچاس": 50, "ساٹھ": 60, "ستر": 70,
+            "اسی": 80, "نوے": 90,
+        }
         colloquial = [
             (r"\b(?:dedh|dehr|daydh)\s*(?:crore|cr)\b", 15_000_000),
             (r"\b(?:dhai|dhaee|dhay)\s*(?:crore|cr)\b", 25_000_000),
@@ -256,11 +338,27 @@ class EstateAgent:
             if re.search(pattern, lowered):
                 return amount
 
+        spoken_number_pattern = "|".join(
+            sorted((re.escape(word) for word in spoken_numbers), key=len, reverse=True)
+        )
+        for unit, multiplier in (
+            # Urdu speech recognition may fuse کروڑ ہے into one token.
+            (r"crore|cr|करोड़|करोड|کروڑ|کھرورہائے|کھرورہے|کھرورہا|کھرور|کھرو", 10_000_000),
+            (r"lakh|lac|lacs|लाख|لاکھ", 100_000),
+        ):
+            spoken_match = re.search(rf"\b({spoken_number_pattern})\s*(?:{unit})\b", lowered)
+            if spoken_match:
+                return spoken_numbers[spoken_match.group(1)] * multiplier
+
         crore_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:crore|cr)\b", lowered)
+        if crore_match is None:
+            crore_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:کروڑ|करोड़|करोड)(?:\b|$|[،,.!?؟])", lowered)
         if crore_match:
             return int(float(crore_match.group(1)) * 10_000_000)
 
         lakh_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:lakh|lac|lacs)\b", lowered)
+        if lakh_match is None:
+            lakh_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:لاکھ|लाख)(?:\b|$|[،,.!?؟])", lowered)
         if lakh_match:
             return int(float(lakh_match.group(1)) * 100_000)
 
@@ -301,26 +399,83 @@ class EstateAgent:
 
     @staticmethod
     def _extract_city(lowered: str) -> str | None:
-        cities = (
-            "karachi", "lahore", "islamabad", "rawalpindi", "faisalabad",
-            "multan", "peshawar", "quetta", "gwadar", "hyderabad", "sialkot",
-            "gujranwala", "abbottabad", "bahawalpur", "sargodha"
-        )
-        for city in cities:
-            if re.search(rf"\b{city}\b", lowered):
-                return city.title()
+        cities = {
+            "Karachi": ("karachi", "کراچی", "कराची"),
+            "Lahore": ("lahore", "لاہور", "लाहौर"),
+            "Islamabad": ("islamabad", "اسلام آباد", "اسلاماباد", "इस्लामाबाद"),
+            "Rawalpindi": ("rawalpindi", "راولپنڈی", "راولپِنڈی", "रावलपिंडी"),
+            "Faisalabad": ("faisalabad", "فیصل آباد", "फैसलाबाद"),
+            "Multan": ("multan", "ملتان", "मुल्तान"),
+            "Peshawar": ("peshawar", "پشاور", "पेशावर"),
+            "Quetta": ("quetta", "کوئٹہ", "क्वेटा"),
+            "Gwadar": ("gwadar", "گوادر", "ग्वादर"),
+            "Hyderabad": ("hyderabad", "حیدرآباد", "हैदराबाद"),
+            "Sialkot": ("sialkot", "سیالکوٹ", "सियालकोट"),
+            "Gujranwala": ("gujranwala", "گوجرانوالہ", "गुजरांवाला"),
+            "Abbottabad": ("abbottabad", "ایبٹ آباد", "ایبٹاباد", "ایبٹ آباد"),
+            "Bahawalpur": ("bahawalpur", "بہاولپور", "बہاولپور"),
+            "Sargodha": ("sargodha", "سرگودھا", "سرگودها"),
+        }
+        for canonical, aliases in cities.items():
+            if any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", lowered) for alias in aliases):
+                return canonical
         return None
 
     @staticmethod
-    def _extract_area(lowered: str) -> str | None:
-        areas = (
-            "dha phase 6", "dha phase 5", "dha phase 2", "dha",
-            "clifton", "gulberg", "f-11", "bahria town", "bahria enclave", "bahria orchard", "bahria",
-            "blue area", "gulshan-e-iqbal", "gulshan", "pechs", "cantt", "johar town", "johar",
-            "model town", "e-11", "g-11", "f-7", "f-8", "f-10", "i-8", "askari", "wapda town"
+    def _is_unqualified_home_request(text: str) -> bool:
+        # STT can code-switch scripts within a single UrduLish phrase (e.g.
+        # Urdu-script "گھر" followed by Devanagari "चाहिए"). Match the
+        # property and request words independently instead of requiring one
+        # exact same-script phrase.
+        property_markers = (
+            "ghar", "گھر", "گار", "घर", "makan", "makaan", "مکان", "मकान",
+            "house", "home", "property",
         )
-        for area in areas:
-            if area in lowered:
+        request_markers = (
+            "\u091a\u093e\u0939\u093f\u090f",
+            "chahiye", "chahie", "چاہیے", "چاہیئے", "چہ آئے", "चاہिए", "चाहिये",
+            "چاہتا ہوں", "چاہتی ہوں", "चाहता हूं", "चाहती हूं",
+        )
+        return any(marker in text for marker in property_markers) and any(
+            marker in text for marker in request_markers
+        )
+
+    @staticmethod
+    def _extract_area(lowered: str) -> str | None:
+        area_aliases = (
+            ("dha phase 6", ("dha phase 6", "ڈی ایچ اے فیز 6", "ڈی ایچ اے فیز ۶", "ڈی ایچ اے فیز چھ")),
+            ("dha phase 5", ("dha phase 5", "ڈی ایچ اے فیز 5", "ڈی ایچ اے فیز ۵", "ڈی ایچ اے فیز پانچ")),
+            ("dha phase 2", ("dha phase 2", "ڈی ایچ اے فیز 2", "ڈی ایچ اے فیز ۲", "ڈی ایچ اے فیز دو")),
+            (
+                "dha",
+                ("dha", "ڈی ایچ اے", "डीएचए", "डी एच ए", "t ah ah min"),
+            ),
+            ("clifton", ("clifton", "کلفٹن", "क्लिफ्टन")),
+            ("gulberg", ("gulberg", "گلبرگ", "गुलबर्ग")),
+            ("f-11", ("f-11", "ایف 11", "ایف-11")),
+            ("bahria town", ("bahria town", "بحریہ ٹاؤن", "बहरिया टाउन")),
+            ("bahria enclave", ("bahria enclave", "بحریہ انکلیو")),
+            ("bahria orchard", ("bahria orchard", "بحریہ آرچرڈ")),
+            ("bahria", ("bahria", "بحریہ")),
+            ("blue area", ("blue area", "بلو ایریا")),
+            ("gulshan-e-iqbal", ("gulshan-e-iqbal", "گلشن اقبال")),
+            ("gulshan", ("gulshan", "گلشن")),
+            ("pechs", ("pechs", "پی ای سی ایچ ایس")),
+            ("cantt", ("cantt", "کینٹ")),
+            ("johar town", ("johar town", "جوہر ٹاؤن")),
+            ("johar", ("johar", "جوہر")),
+            ("model town", ("model town", "ماڈل ٹاؤن")),
+            ("e-11", ("e-11", "ای 11", "ای-11")),
+            ("g-11", ("g-11", "جی 11", "جی-11")),
+            ("f-7", ("f-7", "ایف 7", "ایف-7")),
+            ("f-8", ("f-8", "ایف 8", "ایف-8")),
+            ("f-10", ("f-10", "ایف 10", "ایف-10")),
+            ("i-8", ("i-8", "آئی 8", "آئی-8")),
+            ("askari", ("askari", "عسکری")),
+            ("wapda town", ("wapda town", "واپڈا ٹاؤن")),
+        )
+        for area, aliases in area_aliases:
+            if any(alias in lowered for alias in aliases):
                 return area
         return None
 
@@ -340,6 +495,47 @@ class EstateAgent:
             or "allah hafiz" in text
             or "khuda hafiz" in text
         )
+
+    @staticmethod
+    def _empty_inventory_reply(state: ConversationState) -> str:
+        """Acknowledge retained preferences and ask for only the next missing detail."""
+
+        location = ""
+        if state.city and state.area:
+            area = "DHA" if state.area.casefold() == "dha" else state.area.title()
+            location = f"{state.city}, {area} mein "
+        elif state.city:
+            location = f"{state.city} mein "
+        elif state.area:
+            area = "DHA" if state.area.casefold() == "dha" else state.area.title()
+            location = f"{area} mein "
+
+        purpose = {
+            Intent.BUY: "buy",
+            Intent.RENT: "rent",
+            Intent.COMMERCIAL: "commercial",
+            Intent.INVEST: "investment",
+        }.get(state.intent)
+        if state.city and state.area and purpose:
+            area = "DHA" if state.area.casefold() == "dha" else state.area.title()
+            return (
+                "Company listings abhi load nahi hain. "
+                f"{state.city}, {area} mein {purpose} ke options verify nahi kar sakti."
+            )
+        preference = f"{location}{purpose} preference note kar li." if purpose else ""
+        budget = f"{state.budget:,} PKR budget note kar liya." if state.budget is not None else ""
+        context = " ".join(part for part in (preference, budget) if part)
+        if state.city is None:
+            follow_up = "Aap kis city mein options dekh rahe hain?"
+        elif state.budget is None:
+            follow_up = "Aapka budget range kya hai?"
+        elif state.area is None:
+            follow_up = "Kaunsa area prefer karte hain?"
+        else:
+            follow_up = "Company listings load hone ke baad exact match verify ho sakega."
+
+        lead_in = "Verified listings abhi load nahi hain."
+        return " ".join(part for part in (lead_in, context, follow_up) if part)
 
     def respond(self, conversation_id: str, text: str, language: str = "en") -> AgentDecision:
         result = self.graph.invoke(
@@ -367,7 +563,7 @@ class EstateAgent:
     def _decide(
         self, conversation_id: str, text: str, detected_intent: Intent, language: str = "en"
     ) -> AgentDecision:
-        lowered = text.lower()
+        lowered = _normalize_voice_text(text)
         state = self._load_state(conversation_id)
         state.history.append(f"Caller: {redact_for_retention(text)}")
         state.history = state.history[-20:]
@@ -426,6 +622,19 @@ class EstateAgent:
             ):
                 state.lead_profile["qualified_intent"] = detected_intent.value
             state.intent = detected_intent if detected_intent != Intent.UNKNOWN else state.intent
+            asked_buy_or_rent = any(
+                message.startswith("Agent: ")
+                and "khareedna chahte hain ya rent par" in message.casefold()
+                for message in previous_dialogue
+            )
+            answered_rent = any(
+                marker in lowered
+                for marker in (
+                    "rent", "riend", "رینٹ", "رینت", "رنت", "رنٹ", "وینٹ", "کرایہ", "کرائے", "کرایے"
+                )
+            ) or "پر لینا" in lowered or "par lena" in lowered
+            if state.intent == Intent.UNKNOWN and asked_buy_or_rent and answered_rent:
+                state.intent = Intent.RENT
             parsed_budget = self._extract_budget(lowered)
             if parsed_budget is not None:
                 state.budget = parsed_budget
@@ -454,6 +663,20 @@ class EstateAgent:
                 state.investment_goal = goal
         if state.intent == Intent.UNKNOWN and (state.budget is not None or state.target_size_sqft is not None) and state.area is not None:
             state.intent = Intent.BUY
+        if state.intent == Intent.UNKNOWN and self._is_unqualified_home_request(lowered):
+            location = f"{state.city} ke liye " if state.city else ""
+            budget = f"{state.budget:,} PKR budget note kar liya. " if state.budget else ""
+            return self._finish(
+                conversation_id,
+                state,
+                AgentDecision(
+                    kind="ask_clarification",
+                    reason="property_transaction_type",
+                    spoken_text=(
+                        f"{budget}{location}aap ghar khareedna chahte hain ya rent par lena hai?"
+                    ),
+                ),
+            )
         if state.selected_property_ids and any(
             marker in lowered
             for marker in ("sasta", "sasti", "cheaper", "less expensive", "kam price")
@@ -563,6 +786,32 @@ class EstateAgent:
                 candidate = self._provider_decision(prompt, text)
                 if candidate is not None and candidate.kind in ("answer", "ask_clarification") and not candidate.property_ids and not candidate.source_ids:
                     return self._finish(conversation_id, state, candidate)
+        if state.intent == Intent.UNKNOWN and any(
+            value is not None
+            for value in (
+                state.budget,
+                state.city,
+                state.area,
+                state.bedrooms,
+                state.target_size_sqft,
+            )
+        ):
+            budget = f"{state.budget:,} PKR budget note kar liya. " if state.budget is not None else ""
+            location = f"{state.city} " if state.city else ""
+            area = f"({state.area}) " if state.area else ""
+            if state.city is None:
+                follow_up = "Kis city mein property chahiye, aur buy karni hai ya rent par leni hai?"
+            else:
+                follow_up = "Aap buy karna chahte hain ya rent par lena?"
+            return self._finish(
+                conversation_id,
+                state,
+                AgentDecision(
+                    kind="ask_clarification",
+                    reason="property_qualification",
+                    spoken_text=f"{budget}{location}{area}{follow_up}",
+                ),
+            )
         if state.intent in (Intent.BUY, Intent.RENT, Intent.COMMERCIAL, Intent.INVEST):
             purpose = {
                 Intent.BUY: "sale",
@@ -591,6 +840,16 @@ class EstateAgent:
             self.traces.increment("retrieval:sql_queries")
             if not matches:
                 self.traces.increment("retrieval:sql_misses")
+                if not self.properties.list():
+                    return self._finish(
+                        conversation_id,
+                        state,
+                        AgentDecision(
+                            kind="ask_clarification",
+                            reason="inventory_unavailable",
+                            spoken_text=self._empty_inventory_reply(state),
+                        ),
+                    )
                 if state.budget is not None:
                     no_budget_query = query.model_copy(update={"max_budget_pkr": None})
                     price_comparable = [

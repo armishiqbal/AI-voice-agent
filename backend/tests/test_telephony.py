@@ -190,8 +190,8 @@ def test_media_websocket_measures_caller_turn_but_not_initial_greeting(monkeypat
         assert websocket.receive_json()["event"] == "media"  # Response to the caller turn.
         websocket.send_json({"event": "stop"})
 
-    assert len(measurements["voice.end_of_turn_to_first_audio_ms"]) == 1
-    assert measurements["voice.end_of_turn_to_first_audio_ms"][0] >= 0
+    assert len(measurements["voice.final_transcript_to_first_audio_ms"]) == 1
+    assert measurements["voice.final_transcript_to_first_audio_ms"][0] >= 0
     assert len(measurements["voice.tts_first_audio_latency_ms"]) == 2
     assert len(measurements["voice.tts_stream_duration_ms"]) == 2
 

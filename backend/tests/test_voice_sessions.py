@@ -58,10 +58,10 @@ def test_voice_ticket_binds_selected_audio_mode(tmp_path: Path) -> None:
     Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine, expire_on_commit=False)
     service = VoiceSessionService(f"voice-mode-test-key-{uuid4()}", session_factory=sessions)
-    issued = service.issue("192.0.2.41", "https://voice.example.com", "openai")
+    issued = service.issue("192.0.2.41", "https://voice.example.com", "hybrid")
     assert issued is not None
     ticket, _ = issued
-    assert service.mode_for_ticket(ticket) == "openai"
+    assert service.mode_for_ticket(ticket) == "hybrid"
     assert (
         service.consume(ticket, "192.0.2.41", "https://voice.example.com")
         == VoiceSessionConsumeResult.ACCEPTED
@@ -149,4 +149,3 @@ def test_voice_session_normalizes_loopback_and_ports(tmp_path: Path) -> None:
         == VoiceSessionConsumeResult.INVALID
     )
     engine.dispose()
-

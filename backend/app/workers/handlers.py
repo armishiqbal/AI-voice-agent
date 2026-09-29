@@ -29,6 +29,21 @@ class InternalCrmLeadHandler:
         return {"provider": "internal_crm_log", "lead_id": lead_id, "status": "recorded"}
 
 
+class InternalCrmFollowUpHandler:
+    """Make a due follow-up visible in the durable operator outbox without contacting clients."""
+
+    async def __call__(self, payload: dict[str, object]) -> dict[str, object]:
+        lead_id = payload.get("lead_id")
+        follow_up_at = payload.get("follow_up_at")
+        if not lead_id or not follow_up_at:
+            raise ValueError("lead.follow_up_due payload requires lead_id and follow_up_at")
+        return {
+            "provider": "internal_crm_log",
+            "lead_id": lead_id,
+            "status": "reminder_due",
+        }
+
+
 class InternalCrmCallOutcomeHandler:
     """Record a structured, PII-free call outcome in the CRM-ready outbox log."""
 
@@ -119,6 +134,9 @@ def build_outbox_handlers(config: Settings) -> dict[str, OutboxHandler]:
     if config.n8n_webhook_url and config.n8n_webhook_token:
         sink = N8nCrmHandler(config.n8n_webhook_url, config.n8n_webhook_token)
         handlers["lead.created"] = CompositeOutboxHandler((InternalCrmLeadHandler(), sink))
+        handlers["lead.follow_up_due"] = CompositeOutboxHandler(
+            (InternalCrmFollowUpHandler(), sink)
+        )
         handlers["voice.call_completed"] = CompositeOutboxHandler(
             (InternalCrmCallOutcomeHandler(), sink)
         )
@@ -129,5 +147,6 @@ def build_internal_handlers() -> dict[str, OutboxHandler]:
     """Handlers that do not require an external provider or OAuth credential."""
     return {
         "lead.created": InternalCrmLeadHandler(),
+        "lead.follow_up_due": InternalCrmFollowUpHandler(),
         "voice.call_completed": InternalCrmCallOutcomeHandler(),
     }

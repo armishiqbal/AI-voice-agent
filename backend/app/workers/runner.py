@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.repositories.bootstrap import create_schema_for_local_development
 from app.repositories.conversation_state import ConversationStateStore
 from app.repositories.transcripts import TranscriptStore
+from app.services.follow_up_reminders import LeadFollowUpScheduler
 from app.workers.handlers import build_internal_handlers, build_outbox_handlers
 from app.workers.outbox import OutboxWorker
 
@@ -21,6 +22,7 @@ async def run() -> None:
     if not build_outbox_handlers(settings):
         logger.warning("No Google integration configured; outbox events will remain pending")
     worker = OutboxWorker(handlers, max_attempts=settings.outbox_max_attempts)
+    follow_up_scheduler = LeadFollowUpScheduler()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -41,9 +43,23 @@ async def run() -> None:
             except TimeoutError:
                 continue
 
+    async def schedule_due_follow_ups() -> None:
+        while not stop.is_set():
+            try:
+                queued = await asyncio.to_thread(follow_up_scheduler.enqueue_due)
+                if queued:
+                    logger.info("follow_up_reminders queued=%s", queued)
+            except Exception as error:  # noqa: BLE001 - scheduler failures must not stop delivery
+                logger.error("follow_up_reminders failed error_type=%s", type(error).__name__)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=60)
+            except TimeoutError:
+                continue
+
     await asyncio.gather(
         worker.run_forever(stop, poll_seconds=settings.outbox_poll_seconds, on_error=report_error),
         retention_maintenance(),
+        schedule_due_follow_ups(),
     )
 
 

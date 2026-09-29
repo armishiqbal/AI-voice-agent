@@ -52,7 +52,7 @@ Real embeddings retrieved the gold source for the lexical paraphrase miss. Overl
 
 ## Other reproducible evidence
 
-`python scripts/evaluation/evaluate_rag.py` runs the twenty-case SQL fixture baseline. Its property-ID score is **not** a vector retrieval or factual-claim hallucination score.
+`python scripts/evaluation/evaluate_rag.py` runs the twenty-case SQL fixture baseline and reports exact-match retrieval accuracy, SQL-grounded property-reference rate, and unexpected property-ID case rate, with denominators. The grounding and hallucination metrics are scoped to property references; they are **not** vector retrieval scores or free-form factual-claim entailment scores.
 
 `python scripts/evaluation/evaluate_conversations.py --output artifacts/evaluation/multiturn-conversations.json` runs 44 isolated conversations / 92 turns across eleven required categories. It checks routing, preference memory and available property IDs. It does not measure live voice, model semantic quality, Calendar delivery or email delivery. Existing synthetic rental inventory uses a deliberately artificial price ladder; these numbers are not market estimates.
 

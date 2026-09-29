@@ -8,9 +8,9 @@ This guide covers operational diagnosis, failure isolation, and recovery procedu
 
 | Symptom | Probable Cause | Diagnostic Command / Inspection | Resolution |
 |:---|:---|:---|:---|
-| **Agent hears nothing / No STT transcript** | Mic permission denied, low input gain, or VAD silence threshold too high | Browser Console: `[VAD]` logs or `/v1/voice` WS frames | Ensure microphone is allowed; test with 1-click query chips; check Web Speech API fallback or Deepgram API key |
-| **Agent responds in text but no audio plays** | TTS provider timeout or browser audio autoplay policy | Check network tab for `audio_chunk` WS events; check console for Web Audio suspended state | Click anywhere in UI to enable audio context; check `OPENAI_API_KEY`, `FISH_AUDIO_API_KEY`, or local TTS service URLs |
-| **WebSocket disconnects immediately (Code 1008)** | Invalid Origin header or missing session ticket | Inspect `POST /v1/voice/session` response and WS handshake headers | Verify `CORS_ORIGINS` in `.env` includes client domain (e.g. `http://localhost:5173`) |
+| **Agent hears nothing / no final transcript** | Browser microphone permission/device failure, no captured frames, or server STT failure | Voice troubleshooting stages, browser microphone indicator, `/readyz`, backend logs, and `/v1/voice` WebSocket events | Allow/select a microphone and speak after the UI says Listening. If the provider does not finalize a committed turn, the live voice route asks you to repeat; unconfirmed interim text is not sent to the agent. There is no browser speech-recognition fallback. |
+| **Agent responds in text but no audio plays** | TTS route/provider failure or browser playback/decode failure | Check for `audio_unavailable`, `audio_chunk`, browser playback errors, and the replay control | Follow the stage-specific recovery message; check provider account credits and configured TTS route. The app does not substitute browser speech. |
+| **WebSocket disconnects immediately (Code 1008)** | Missing/expired one-use session ticket or rejected Origin | Inspect `POST /v1/voice/session`, the WS handshake, and server security logs | Confirm the browser uses the configured origin and starts a fresh voice session; do not reuse an old ticket. |
 | **Booking fails: "Slot unavailable"** | Slot outside business hours (Mon-Sat, 10:00-18:00 PKT) or employee booked | Query `GET /v1/appointments/slots?property_id=PROP-001` | Choose slot on half-hour boundary within business hours |
 | **Google Calendar events not created** | Missing or expired `secrets/google.token.json` | Check outbox table: `SELECT * FROM outbox_events WHERE status = 'pending'` | Run `python scripts/admin/authorize_google.py` to refresh OAuth token |
 | **Database error: "Table not found"** | Unmigrated SQLite/PostgreSQL schema | Run `alembic current` in `backend/` | Run `cd backend && alembic upgrade head` or delete dev SQLite DB for auto-rebuild |
@@ -21,32 +21,27 @@ This guide covers operational diagnosis, failure isolation, and recovery procedu
 
 ### A. Browser Microphone & Web Audio Capture
 * **Issue**: Microphone is active, but Neural Orbit particle sphere doesn't react.
-* **Root Cause**: Web Audio `AudioContext` is in suspended state due to browser autoplay security policies.
+* **Root Cause**: Microphone capture, its `AudioWorklet`, or the Web Audio context may not have started.
 * **Resolution**:
-  1. Ensure the user clicks the microphone button or any UI element first to resume `AudioContext`.
-  2. In `frontend/src/voiceAudio.ts`, verify `audioCtx.state === 'running'`.
-  3. Ensure `audioCtx.createAnalyser()` is connected to the microphone `MediaStreamSource`.
+  1. Start voice using the call control, which requests the microphone from the browser.
+  2. Check browser permission and the selected input in Voice & Language Settings.
+  3. Confirm the UI advances from Microphone starting to Listening only after AudioWorklet frames arrive.
 
 ### B. Dual-Language STT Recognition Drops
 * **Issue**: Pakistani English/Urdu mixed words (*"Marla"*, *"Kanal"*, *"Clifton"*) are dropped or misheard.
-* **Root Cause**: Web Speech API set to a single language model or Deepgram endpointing threshold too short.
+* **Root Cause**: The selected server transcription route may misrecognize code-switched speech or omit a short word.
 * **Resolution**:
-  1. The client utilizes dual recognition (`en-US` for Latin script UrduLish + `ur-PK` for Urdu script).
-  2. For server-side Deepgram STT, configure:
-     ```env
-     STT_PROVIDER=deepgram
-     STT_MODEL=nova-3
-     STT_LANGUAGE=multi
-     STT_ENDPOINTING_MS=300
-     ```
+  1. Check the final transcript shown for that turn and verify the selected language route.
+  2. Inspect the actual `STT_PROVIDER`, `STT_MODEL`, and Urdu-language settings in the local `.env`; do not assume a browser-side fallback is active.
+  3. Retest with a clear, short phrase. Record native-speaker accuracy issues for human evaluation rather than treating a synthetic loopback as language-quality proof.
 
 ### C. Barge-in / Interruption Timing
 * **Issue**: User speaks while agent is talking, but agent keeps speaking.
 * **Root Cause**: High noise floor preventing client VAD trigger, or server-side cancel event dropped.
 * **Resolution**:
   1. The client implements Adaptive VAD (`frontend/src/voiceVad.ts`) learning the background ambient noise.
-  2. Immediate cancellation sends `{"type": "cancel"}` over the WebSocket.
-  3. Client stops `speechSynthesis.cancel()` immediately and flushes the incoming audio buffer.
+  2. The client stops current browser playback and sends `{"type": "barge_in"}` over the WebSocket.
+  3. Inspect `voice.barge_in_cancel_latency_ms` and confirm the next response has a new response ID; the app uses provider audio and does not call browser `speechSynthesis`.
 
 ---
 
@@ -107,8 +102,9 @@ This guide covers operational diagnosis, failure isolation, and recovery procedu
 * **Issue**: WhatsApp messages fail to deliver with `TelephonyProviderError`.
 * **Root Cause**: Missing Twilio or Meta WhatsApp Business API credentials in `.env`.
 * **Resolution**:
-  1. If credentials are unset, the outbox worker safely simulates delivery in development and logs the structured dispatch event.
-  2. For live delivery, provide:
+  1. Check `/readyz` for `calendar` and `gmail`. Configuration readiness does not prove delivery.
+  2. Inspect the outbox event's `status`, `attempts`, and `last_error`. Missing OAuth leaves work pending; it is not marked as delivered.
+  3. For live delivery, configure:
      ```env
      TWILIO_ACCOUNT_SID=ACxxx
      TWILIO_AUTH_TOKEN=xxx

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Literal
 from uuid import UUID, uuid4
@@ -142,6 +142,15 @@ class LeadCreate(BaseModel):
     notes: str = Field(default="", max_length=500)
     follow_up_at: datetime | None = None
     consent: bool
+
+    @field_validator("follow_up_at")
+    @classmethod
+    def normalize_follow_up_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("Follow-up time must include a timezone")
+        return value.astimezone(UTC)
 
     @field_validator("consent")
     @classmethod

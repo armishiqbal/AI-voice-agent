@@ -3,10 +3,24 @@
 ## Health and readiness
 
 - `GET /healthz` — process health.
-- `GET /readyz` — application and live-provider readiness. `mode` is `live` only when a real
+- `GET /readyz` — application and voice-route configuration. `mode` is `live` only when a real
   server-side voice option is configured; otherwise the response is degraded and voice is blocked.
-  production is degraded until required providers are configured.
-- `GET /v1/admin/metrics` — bounded traces, counters, latency measurements, and provider status.
+  `live_voice.status="configured_unverified"` and `verification="configuration_only"` mean
+  credentials and SDK checks passed; they do not prove provider account access or an end-to-end
+  speech turn. The UI keeps the route selectable and verifies it when the caller starts a session.
+  `structured_reasoning.status` distinguishes `unconfigured`, `configured_unverified`, `cooldown`,
+  and persistent `provider_error`; `last_failure_category` contains only a sanitized category
+  such as `rate_limited`, `authentication_failed`, `timeout`, or `invalid_response`. A prior failure
+  remains visible after cooldown until a model request succeeds. Configured hybrid voice can still
+  use its deterministic fallback. A configured key is not proof of model quota or a successful
+  live decision.
+- `GET /v1/admin/metrics` — bounded traces, counters, latency measurements, provider status, and
+  due follow-up reminders with contact fields omitted.
+- `POST /v1/admin/follow-ups/{lead_id}/complete` — mark a due reminder complete after staff
+  confirms the follow-up; the action is audited and idempotent for already-contacted leads.
+- Each WebSocket `agent_response` also includes `reasoning_status` and
+  `reasoning_failure_category` so the UI can show deterministic-fallback status immediately after
+  a turn without exposing raw provider error details.
 - `GET /v1/admin/evaluations/report` — local 41-case report, explicitly fixture-scoped.
   Outside development both require the `X-Admin-Api-Key` header matching `ADMIN_API_KEY`.
 - `GET /v1/admin/outbox?limit=50` — delivery attempts and retry state without encrypted contact
@@ -34,7 +48,8 @@
 
 - `POST /v1/leads` — consent-bound seller or uncertain-intent handoff. Email is encrypted at
   rest, notes are redacted, and a `lead.created` event is written to the transactional outbox.
-  The local worker records this CRM-ready event without requiring n8n.
+  The local worker records this CRM-ready event without requiring n8n. Due follow-up times create
+  a separate PII-minimized `lead.follow_up_due` event; no client email or message is sent.
 
 Outside development, inventory imports, knowledge ingestion, metrics, evaluation, outbox, and audit
 endpoints require the `X-Admin-Api-Key` header. The consented lead form remains public so a browser
@@ -50,7 +65,9 @@ consent or appointment identity.
 - `POST /v1/voice/session` issues a short-lived, one-use anonymous voice ticket. It requires an
   allowed `Origin`, applies a database-backed limit of ten tickets per client address per minute,
   and returns the bearer ticket with `Cache-Control: no-store`. The database stores only its hash
-  and an HMAC fingerprint of the client address.
+  and an HMAC fingerprint of the client address. Consuming a ticket atomically reserves a bounded
+  active-call lease (global limit 20 in development; configured for non-development, two per client
+  by default); PostgreSQL concurrency coverage passes locally.
 - `WS /v1/voice` requires the ticket as its first JSON message (`{"type":"authenticate", "ticket":"…"}`)
   within five seconds. The ticket is bound to the same Origin and client address, expires after
   two minutes, and is atomically consumed once. Do not put it in the WebSocket URL. Then the socket

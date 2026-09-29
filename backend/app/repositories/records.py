@@ -67,6 +67,9 @@ class LeadRecord(Base):
     follow_up_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    follow_up_enqueued_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(32), default="new", index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True

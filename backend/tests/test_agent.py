@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
+
 from app.agents.graph import EstateAgent
 from app.domain.models import AgentDecision, AppointmentRequest, PropertyQuery
 from app.integrations.rag.pinecone import RetrievedChunk
@@ -18,6 +20,247 @@ def test_recommends_available_sale_property():
     )
     assert decision.kind == "recommend"
     assert decision.property_ids
+
+
+@pytest.mark.parametrize(
+    ("utterance", "expected_intent"),
+    [
+        ("I want to rent a home in Karachi; show me verified listings", "rent"),
+        ("Find me available rental listings", "rent"),
+        ("riend پڑھ لینا آئے", "rent"),
+        ("رِنٹ پڑھ لینا آئے،", "rent"),
+        ("رنت پڑھ لینا آئے", "rent"),
+        ("وینٹ پر لینا ہے", "rent"),
+        ("Show me available listings in Karachi", "unknown"),
+        ("I want to sell my house", "sell"),
+        ("Please list my property for sale", "sell"),
+    ],
+)
+def test_listing_search_is_not_misclassified_as_a_seller_lead(
+    utterance: str,
+    expected_intent: str,
+) -> None:
+    assert EstateAgent._intent(utterance).value == expected_intent
+
+
+def test_rental_with_listing_word_does_not_trigger_seller_handoff() -> None:
+    agent = EstateAgent(PropertyRepository())
+
+    decision = agent.respond(
+        "rental-listing-wording",
+        "I want to rent a home in Karachi with a budget around PKR 100,000. "
+        "What verified listings are available?",
+        "ur-Latn",
+    )
+
+    assert agent.states["rental-listing-wording"].intent.value == "rent"
+    assert decision.reason != "seller_lead"
+    assert "seller request" not in decision.spoken_text.casefold()
+
+
+def test_empty_live_inventory_is_reported_instead_of_claiming_no_match():
+    class EmptyProperties:
+        def list(self, query=None):
+            del query
+            return []
+
+    decision = EstateAgent(EmptyProperties()).respond(
+        "empty-inventory", "Find me a home in Karachi.", "ur-Latn"
+    )
+
+    assert decision.kind == "ask_clarification"
+    assert decision.reason == "inventory_unavailable"
+    assert "load nahi hain" in decision.spoken_text
+    assert len(decision.spoken_text.split()) <= 22
+
+
+def test_empty_inventory_acknowledges_spoken_budget_instead_of_asking_again():
+    class EmptyProperties:
+        def list(self, query=None):
+            del query
+            return []
+
+    agent = EstateAgent(EmptyProperties())
+    decision = agent.respond(
+        "empty-inventory-budget", "Find a home in Karachi with a budget of five crore."
+    )
+
+    assert agent.states["empty-inventory-budget"].budget == 50_000_000
+    assert "50,000,000 PKR budget note kar liya" in decision.spoken_text
+    assert "budget aur" not in decision.spoken_text
+
+
+def test_live_empty_inventory_fallback_keeps_city_intent_and_area_without_reasking() -> None:
+    class EmptyProperties:
+        def list(self, query=None):
+            del query
+            return []
+
+    agent = EstateAgent(EmptyProperties())
+    conversation_id = "live-empty-inventory-context"
+    first = agent.respond(
+        conversation_id,
+        "مج کراچی مائنڈ گار چہ آئے، میرا بجٹ پانچ کھرورہائے۔",
+        "ur-Latn",
+    )
+    second = agent.respond(conversation_id, "رینٹ پڑھ لینا آئے،", "ur-Latn")
+    third = agent.respond(conversation_id, "T Ah Ah min کوئے سیسٹی آپشن ہائے", "ur-Latn")
+
+    assert "rent" in first.spoken_text
+    assert "50,000,000 PKR budget note kar liya" in first.spoken_text
+    assert second.reason == "inventory_unavailable"
+    assert "Karachi mein rent preference note kar li" in second.spoken_text
+    assert "50,000,000 PKR budget note kar liya" in second.spoken_text
+    assert "Kaunsa area prefer karte hain?" in second.spoken_text
+    assert "area share" not in second.spoken_text
+    assert third.reason == "inventory_unavailable"
+    assert "Karachi, DHA mein rent ke options verify nahi kar sakti" in third.spoken_text
+    assert len(third.spoken_text.split()) <= 17
+    assert "50,000,000 PKR" not in third.spoken_text
+    assert "budget aur area" not in third.spoken_text
+
+
+@pytest.mark.parametrize("number_word", ["पाँच", "पांच", "پانچ"])
+def test_parses_spoken_budget_numbers_in_urdu_scripts(number_word: str) -> None:
+    agent = EstateAgent(PropertyRepository())
+    agent.respond("urdu-budget", f"Karachi mein ghar chahiye, budget {number_word} crore")
+    assert agent.states["urdu-budget"].budget == 50_000_000
+
+
+def test_understands_live_urdu_transcript_city_budget_and_asks_buy_or_rent() -> None:
+    transcript = "मुझे कराची में घर चाहिए, मेरा बजट पांच करोड़ है।"
+    agent = EstateAgent(PropertyRepository())
+    decision = agent.respond("urdu-transcript", transcript, "ur-Latn")
+    state = agent.states["urdu-transcript"]
+
+    assert state.city == "Karachi"
+    assert state.budget == 50_000_000
+    assert decision.kind == "ask_clarification"
+    assert decision.reason == "property_transaction_type"
+    assert "50,000,000 PKR" in decision.spoken_text
+    assert "khareedna" in decision.spoken_text
+    assert "rent" in decision.spoken_text
+
+
+def test_understands_live_mixed_script_urdu_lish_transcript() -> None:
+    transcript = "मुझे  कराची में گھر چاہیے, मेरा बजट पाँच करोड़ है।"
+    agent = EstateAgent(PropertyRepository())
+
+    decision = agent.respond("mixed-script-urdu-transcript", transcript, "ur-Latn")
+    state = agent.states["mixed-script-urdu-transcript"]
+
+    assert state.city == "Karachi"
+    assert state.budget == 50_000_000
+    assert decision.reason == "property_transaction_type"
+    assert "50,000,000 PKR" in decision.spoken_text
+    assert "khareedna" in decision.spoken_text
+    assert "rent" in decision.spoken_text
+
+
+def test_budget_only_qualification_uses_fast_deterministic_clarification() -> None:
+    class UnusedProvider:
+        def decide(self, system_prompt: str, user_text: str) -> AgentDecision:
+            raise AssertionError("Collecting city and transaction type must not call the LLM")
+
+    agent = EstateAgent(PropertyRepository(), decision_provider=UnusedProvider())
+    decision = agent.respond("budget-only-fast-path", "Budget 50 lakh", "ur-Latn")
+
+    assert decision.reason == "property_qualification"
+    assert agent.states["budget-only-fast-path"].budget == 5_000_000
+    assert "5,000,000 PKR budget note kar liya" in decision.spoken_text
+    assert "Kis city" in decision.spoken_text
+    assert "buy" in decision.spoken_text and "rent" in decision.spoken_text
+
+    follow_up = agent.respond("budget-only-fast-path", "Karachi", "ur-Latn")
+    assert agent.states["budget-only-fast-path"].city == "Karachi"
+    assert agent.states["budget-only-fast-path"].budget == 5_000_000
+    assert "buy karna chahte hain ya rent" in follow_up.spoken_text
+
+
+def test_urdu_script_spoken_tens_budget_uses_fast_qualification_path() -> None:
+    class UnusedProvider:
+        def decide(self, system_prompt: str, user_text: str) -> AgentDecision:
+            raise AssertionError("A spoken Urdu budget must be parsed before calling the LLM")
+
+    agent = EstateAgent(PropertyRepository(), decision_provider=UnusedProvider())
+    decision = agent.respond("urdu-budget-fast-path", "بجٹ پچاس لاکھ", "ur-Arab")
+
+    assert agent.states["urdu-budget-fast-path"].budget == 5_000_000
+    assert decision.reason == "property_qualification"
+    assert "5,000,000 PKR budget note kar liya" in decision.spoken_text
+    assert "Kis city" in decision.spoken_text
+
+
+def test_devanagari_rent_clarification_stays_on_deterministic_path() -> None:
+    class EmptyRepository:
+        def list(self, query=None):
+            del query
+            return []
+
+        def get_available(self, property_id):
+            del property_id
+
+    class UnusedProvider:
+        def decide(self, system_prompt: str, user_text: str) -> AgentDecision:
+            raise AssertionError("A rent clarification should not need a general LLM call")
+
+    agent = EstateAgent(EmptyRepository(), decision_provider=UnusedProvider())
+    first = agent.respond(
+        "devanagari-rent-follow-up",
+        "मुझे  कराची में گھر چاہیے, मेरा बजट पाँच करोड़ है।",
+        "ur-Latn",
+    )
+    second = agent.respond("devanagari-rent-follow-up", "रेंट पर लेना है।", "ur-Latn")
+
+    assert first.reason == "property_transaction_type"
+    assert agent.states["devanagari-rent-follow-up"].intent.value == "rent"
+    assert second.reason == "inventory_unavailable"
+
+
+@pytest.mark.parametrize(
+    "rent_reply",
+    [
+        "رینتھ پر لینا ہے",
+        "رینٹ پر لینا ہے",
+        "رِنٹ پڑھ لینا آئے،",
+        "riend پڑھ لینا آئے",
+        "وینٹ پر لینا ہے",
+        "رنت پڑھ لینا آئے",
+    ],
+)
+def test_urdu_rent_reply_uses_prior_buy_or_rent_question_without_general_llm(
+    rent_reply: str,
+) -> None:
+    class EmptyRepository:
+        def list(self, query=None):
+            del query
+            return []
+
+        def get_available(self, property_id):
+            del property_id
+
+    class UnusedProvider:
+        def decide(self, system_prompt: str, user_text: str) -> AgentDecision:
+            raise AssertionError("A contextual rent answer should not need a general LLM call")
+
+    agent = EstateAgent(EmptyRepository(), decision_provider=UnusedProvider())
+    first = agent.respond(
+        "urdu-rent-follow-up",
+        "मुझे कराची में घर चाहिए, मेरा बजट पाँच करोड़ है।",
+        "ur-Latn",
+    )
+    second = agent.respond("urdu-rent-follow-up", rent_reply, "ur-Latn")
+
+    assert first.reason == "property_transaction_type"
+    assert agent.states["urdu-rent-follow-up"].intent.value == "rent"
+    assert second.reason == "inventory_unavailable"
+    assert "listings abhi load nahi hain" in second.spoken_text
+
+
+def test_extracts_dha_area_from_urdu_script_without_guessing_other_areas() -> None:
+    assert EstateAgent._extract_area("ڈی ایچ اے میں کوئی سستی آپشن ہے؟") == "dha"
+    assert EstateAgent._extract_area("ڈی ایچ اے فیز 6 میں ghar chahiye") == "dha phase 6"
+    assert EstateAgent._extract_area("t ah ah min koee sasti option hai") == "dha"
 
 
 def test_budget_below_cheapest_matching_listing_is_flagged_for_sales_follow_up() -> None:
@@ -193,6 +436,27 @@ def test_colloquial_budget_extraction() -> None:
     assert agent._extract_budget("80 hazar budget hai") == 80_000
     assert agent._extract_budget("50 lakh mein flat mil jaye") == 5_000_000
     assert agent._extract_budget("budget 3.5 crore") == 35_000_000
+    assert agent._extract_budget("کراچی میں گھر، budget 5 کروڑ ہے") == 50_000_000
+    assert agent._extract_budget("میرا بجٹ پانچ کھرورہائے") == 50_000_000
+    assert agent._extract_budget("میرا بجٹ پانچ کھرورہا") == 50_000_000
+    assert agent._extract_budget("میرا بجٹ پانچ کھرو") == 50_000_000
+    assert agent._extract_budget("Mera budget paunch crore high") == 50_000_000
+    assert agent._extract_budget("3 لاکھ تک budget hai") == 300_000
+
+
+def test_live_urdu_asr_transcript_still_qualifies_city_budget_and_home_intent() -> None:
+    transcript = "مج کراچی مائنگار چہ آئے، میرا بجٹ پانچ کھرورہا"
+    agent = EstateAgent(PropertyRepository())
+
+    decision = agent.respond("live-urdu-asr", transcript, "ur-Arab")
+    state = agent.states["live-urdu-asr"]
+
+    assert state.city == "Karachi"
+    assert state.budget == 50_000_000
+    assert decision.reason == "property_transaction_type"
+    assert "Karachi" in decision.spoken_text
+    assert "50,000,000 PKR" in decision.spoken_text
+    assert "khareedna chahte hain ya rent" in decision.spoken_text
 
 
 def test_general_qa_delegates_to_decision_provider_when_present() -> None:
@@ -239,6 +503,49 @@ def test_model_context_keeps_both_sides_of_prior_turn_without_repeating_current_
 def test_combined_greeting_does_not_swallow_property_request():
     decision = EstateAgent(PropertyRepository()).respond("hello-search", "Hello, I want to buy in Karachi with budget 3 crore")
     assert decision.kind == "recommend"
+
+
+def test_generic_property_search_uses_deterministic_inventory_path() -> None:
+    class EmptyRepository:
+        def list(self, query=None):
+            return []
+
+        def get_available(self, property_id):
+            return None
+
+    class UnusedProvider:
+        def decide(self, system_prompt: str, user_text: str) -> AgentDecision:
+            raise AssertionError("A property search should not need a general LLM call")
+
+    agent = EstateAgent(EmptyRepository(), decision_provider=UnusedProvider())
+    decision = agent.respond(
+        "generic-property-search",
+        "Find an available property in Karachi under thirty million rupees.",
+    )
+
+    assert decision.kind == "ask_clarification"
+    assert agent.states["generic-property-search"].intent.value == "buy"
+    assert agent.states["generic-property-search"].city == "Karachi"
+
+
+def test_natural_home_search_uses_deterministic_inventory_path() -> None:
+    class EmptyRepository:
+        def list(self, query=None):
+            return []
+
+        def get_available(self, property_id):
+            return None
+
+    class UnusedProvider:
+        def decide(self, system_prompt: str, user_text: str) -> AgentDecision:
+            raise AssertionError("A home search should not spend a model call on routing")
+
+    agent = EstateAgent(EmptyRepository(), decision_provider=UnusedProvider())
+    decision = agent.respond("natural-home-search", "I am looking for a home in Karachi")
+
+    assert decision.kind == "ask_clarification"
+    assert agent.states["natural-home-search"].intent.value == "buy"
+    assert agent.states["natural-home-search"].city == "Karachi"
 
 
 def test_lifecycle_and_guardrail_turns_are_saved_in_memory():

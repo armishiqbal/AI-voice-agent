@@ -16,6 +16,23 @@ def test_csv_import_keeps_valid_rows_and_reports_invalid_rows() -> None:
     assert result.source == "crm-export-2026-09-22"
 
 
+def test_csv_import_rejects_unknown_availability_instead_of_marking_it_unavailable() -> None:
+    headers = b"id,title,city,area,purpose,price_pkr,bedrooms,size_sqft,developer,payment_plan,available,assigned_employee\n"
+    data = headers + (
+        b"P-1,Available House,Karachi,DHA,sale,25000000,3,1800,Dev,Installments,yes,Ayesha\n"
+        b"P-2,Unavailable House,Karachi,DHA,sale,25000000,3,1800,Dev,Installments,false,Ayesha\n"
+        b"P-3,Unclear House,Karachi,DHA,sale,25000000,3,1800,Dev,Installments,maybe,Ayesha\n"
+    )
+
+    result = parse_inventory_bytes(data, "inventory.csv", "owner-reviewed")
+
+    assert [(item.id, item.available) for item in result.records] == [
+        ("P-1", True),
+        ("P-2", False),
+    ]
+    assert [(issue.row, issue.field) for issue in result.errors] == [(4, "available")]
+
+
 def test_json_import_accepts_properties_envelope() -> None:
     data = b'{"properties": [{"id":"P-1","title":"House","city":"Lahore","area":"Gulberg","purpose":"rent","price_pkr":100000,"bedrooms":2,"size_sqft":900,"amenities":[],"nearby_schools":["Model School"],"nearby_hospitals":["City Hospital"],"developer":"Dev","payment_plan":"Monthly","available":true,"assigned_employee":"Ali","source_version":"v1"}]}'
     result = parse_inventory_bytes(data, "inventory.json", "erp-v2")

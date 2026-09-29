@@ -20,7 +20,10 @@ def create_schema_for_local_development() -> None:
             "investment_goal": "VARCHAR(100)",
         },
         "properties": {"investment_goals": "JSON NOT NULL DEFAULT '[]'"},
-        "leads": {"follow_up_at": "DATETIME"},
+        "leads": {
+            "follow_up_at": "DATETIME",
+            "follow_up_enqueued_at": "DATETIME",
+        },
     }
     with engine.begin() as connection:
         for table, columns in additions.items():

@@ -1,8 +1,8 @@
 """Enforce distributed active voice-session limits with expiring leases."""
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0021_voice_session_leases"
 down_revision = "0020_voice_session_credentials"

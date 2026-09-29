@@ -20,6 +20,8 @@ python scripts/evaluation/evaluate_rag.py
 python scripts/evaluation/evaluate_memory.py
 python scripts/evaluation/evaluate_appointments.py
 python scripts/evaluation/release_report.py
+POSTGRES_PASSWORD=local-config-check-only docker compose config --quiet
+docker build -t awaaz-estate:capstone-local .
 ```
 
 Also execute the multi-turn conversation evaluator included with the submission. Retain case
@@ -27,12 +29,17 @@ IDs, expected/actual outcomes, denominators and failures. The original 41 single
 not alone meet the requirement for forty test conversations. SQL retrieval results must retain
 their fixture label; source-ID correctness is narrower than full factual claim correctness.
 
+The live voice evaluator writes its diagnostic artifact even when the acceptance gates fail; its
+exit code is non-zero unless every turn has a final transcript, final audio, and substantive audio
+within the configured two-second target. Acknowledgement audio does not satisfy the substantive
+answer gate. The run still labels synthetic input and does not establish physical audibility or p95.
+
 | Gate | Required evidence |
 |---|---|
 | Backend/frontend | Current tests, lint and build output; explain all skips |
-| Packaging | Wheel contains nested `app` packages; Docker image builds without embedding secrets |
-| Migrations | Upgrade on a disposable SQLite DB and PostgreSQL DB; never downgrade a real client DB for testing |
-| Concurrency | PostgreSQL appointment conflict, ticket issuance and active-call lease checks |
+| Packaging | Passed: wheel contains nested `app` packages; ARM64 Docker image builds without copying `.env`/secrets. Isolated container serves frontend and `/healthz` returns `ok`; provider readiness is blocked without runtime credentials |
+| Migrations | Passed: upgraded disposable SQLite and PostgreSQL 18 databases to head; PostgreSQL also upgraded from revision `0006` with a legacy 32-character version column. Never downgrade a real client DB for testing |
+| Concurrency | Passed locally: PostgreSQL appointment conflict, ticket issuance and active-call lease checks; hosted contention/soak remains outstanding |
 | Agent/RAG | Multi-turn suite, twenty retrieval questions, memory, injection cases, chunk comparison |
 | Workflow | Receipt persistence/retry tests, validated employee mapping, inactive n8n export structure |
 | Voice | AudioWorklet capture, stop/reconnect/error handling and continuous turn contracts |
@@ -57,8 +64,12 @@ CI provisions PostgreSQL; a checked-in workflow is not proof that the remote CI 
 ## Deployment — deferred by user
 
 The Dockerfile builds frontend assets and the Python runtime; Compose prepares PostgreSQL,
-migrations, API, worker and optional n8n. A running Docker daemon is needed to build/execute it.
-Pin the selected n8n image tag/digest before a reproducible release; do not rely on `latest`.
+migrations, API, worker and optional n8n. The local ARM64 image build and isolated health smoke
+passed; this does not start the Compose stack or deploy it. The optional n8n image is pinned to
+`docker.n8n.io/n8nio/n8n:2.40.7`, the stable release listed on 2026-09-25 ([official release
+notes](https://github.com/n8n-io/n8n/releases)). Validate the exported workflow against that
+version before changing the pin. The version tag improves repeatability; use a registry digest
+for immutable release provenance.
 Deployment additionally needs trusted-proxy/origin settings, secret management, TLS, durable
 monitoring, backups, resource/call limits and an operator rollback plan. No hosted environment,
 carrier acceptance, uptime SLA or production readiness is claimed by this local handover.

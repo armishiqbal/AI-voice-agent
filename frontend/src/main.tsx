@@ -1,15 +1,30 @@
 import React, { useEffect, useRef, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { NeuralOrb } from "./NeuralOrb";
-import { OrbitalLaserBeams } from "./OrbitalLaserBeams";
 import { WaveformVisualizer } from "./WaveformVisualizer";
 import { BrowserAudioCapture, BrowserAudioPlayback } from "./voiceAudio";
 import { parseServerEvent, shouldInterruptPlayback, audioUplinkState } from "./voiceProtocol";
-import { closeVoiceSession, resolveLiveVoiceAction, VoiceInputGate, VoiceResponseTracker } from "./voiceConversation";
-import { BoundedAudioReplay } from "./voiceReplay";
+import { closeVoiceSession, resolveLiveVoiceAction, shouldAutoReconnectVoice, voiceReconnectDelayMs, VoiceInputGate, VoiceResponseTracker } from "./voiceConversation";
+import { BoundedAudioReplay, enqueueReplay } from "./voiceReplay";
+import { voiceModeForLanguage } from "./voiceMode.mjs";
+import {
+  resolveAudioUnavailableMessage,
+  resolveDisplayedVoicePhase,
+  parseRuntimeReadiness,
+  type RuntimeReadiness,
+  resolveSttUnavailableMessage,
+  resolveVoiceNotReadyMessage,
+  resolveVoiceConnectionStatus,
+  shouldApplyServerVoicePhase,
+  shouldOfferVoiceRetry,
+} from "./voiceUiState.mjs";
 import { PropertyComparisonHUD } from "./PropertyComparisonHUD";
-import { PropertyMapRadar } from "./PropertyMapRadar";
+import { PropertyLocations } from "./PropertyLocations";
 import { MortgageCalculatorModal } from "./MortgageCalculatorModal";
+import { AnalyticsPanel } from "./AnalyticsPanel";
+import { availabilityLabel, canRequestVisit, inventorySourceLabel, inventoryStatusSummary } from "./propertyFacts.mjs";
+import { defaultVisitSlot, visitSlotError, visitSlotToIso } from "./visitSlots.mjs";
+import { useNativeDialog } from "./useNativeDialog";
 import "./styles.css";
 
 type Property = {
@@ -23,15 +38,18 @@ type Property = {
   purpose: string;
   amenities: string[];
   payment_plan: string;
+  available: boolean;
   assigned_employee: string;
-  source?: string;
+  source_version: string;
+  source: string;
 };
 
 type Message = { role: "customer" | "agent"; text: string; time: string };
-type RuntimeReadiness = { ready: boolean; mode: string; providers: Record<string, boolean> };
-type VoicePhase = "checking" | "blocked" | "idle" | "connecting" | "authenticating" | "listening" | "thinking" | "speaking" | "error";
+type VoicePhase = "checking" | "blocked" | "idle" | "connecting" | "authenticating" | "starting_microphone" | "listening" | "thinking" | "speaking" | "error";
+type VoiceFailureStage = "session" | "microphone" | "transcription" | "agent" | "playback";
 type FeedbackTone = "info" | "pending" | "success" | "error";
-type VoiceMode = "standard" | "openai";
+type VoiceMode = "standard" | "openai" | "hybrid";
+type InventoryLoadState = "loading" | "ready" | "error";
 
 const stamp = () => new Intl.DateTimeFormat("en-PK", { hour: "numeric", minute: "2-digit" }).format(new Date());
 
@@ -85,128 +103,266 @@ const paths = {
   home: "m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z",
   calendar: "M8 2v4m8-4v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14H3V6a2 2 0 0 1 2-2Z",
   transcript: "M4 5h16M4 10h16M4 15h10M4 20h7",
+  copy: "M8 8h11v13H8z M5 16H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1",
   close: "M18 6 6 18 M6 6l12 12",
   building: "M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z M6 12h12 M6 7h12 M6 17h12",
-  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z",
+  settings: "M10.8 2h2.4l.48 2.1a8 8 0 0 1 1.63.68l1.92-1.1 1.7 1.7-1.1 1.92c.29.5.52 1.05.68 1.63l2.1.48v2.4l-2.1.48a8 8 0 0 1-.68 1.63l1.1 1.92-1.7 1.7-1.92-1.1a8 8 0 0 1-1.63.68l-.48 2.1h-2.4l-.48-2.1a8 8 0 0 1-1.63-.68l-1.92 1.1-1.7-1.7 1.1-1.92a8 8 0 0 1-.68-1.63l-2.1-.48v-2.4l2.1-.48a8 8 0 0 1 .68-1.63l-1.1-1.92 1.7-1.7 1.92 1.1a8 8 0 0 1 1.63-.68L10.8 2Z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
+  chart: "M4 19V5m0 14h17M8 15l3-4 3 2 5-7",
+  compare: "M4 4h6v16H4zM14 4h6v16h-6zM6 8h2M6 12h2M6 16h2M16 8h2M16 12h2M16 16h2",
 };
 
 const voicePhaseLabels: Record<VoicePhase, string> = {
-  checking: "Establishing orbital connection…",
+  checking: "Checking live voice service…",
   blocked: "Live voice is unavailable. Check provider readiness before starting a call.",
-  idle: "Awaaz Neural Orbit Ready — Click Orb to speak",
+  idle: "Ready when you are — start a voice conversation or type a question",
   connecting: "Connecting voice session…",
   authenticating: "Authenticating security token…",
+  starting_microphone: "Starting microphone…",
   listening: "Listening… Speak your requirement",
-  thinking: "Finding verified matching properties…",
+  thinking: "Searching available inventory…",
   speaking: "Awaaz Estate is responding…",
-  error: "Voice connection error — Click Orb to retry",
+  error: "Voice connection failed. Use the voice button to reconnect.",
 };
 
+function microphoneFailureMessage(error: unknown): string {
+  const name = error instanceof Error ? error.name : "UnknownError";
+  switch (name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return "Microphone permission was denied. Allow microphone access for this site, then retry.";
+    case "NotFoundError":
+    case "DevicesNotFoundError":
+      return "No microphone was found. Connect or select an input device, then retry.";
+    case "NotReadableError":
+    case "TrackStartError":
+      return "The microphone is busy or unavailable. Close other apps using it, then retry.";
+    case "OverconstrainedError":
+      return "The selected microphone is unavailable. Choose System default in Voice Settings, then retry.";
+    case "NotSupportedError":
+      return "This browser cannot start the voice capture worklet. Update the browser and retry.";
+    default:
+      return `Microphone setup failed (${name}). Check site permission and the selected input, then retry.`;
+  }
+}
+
 function App() {
-  const [activeActionLabel, setActiveActionLabel] = useState<string>("SYSTEM STANDBY — ORBIT READY");
+  const [activeActionLabel, setActiveActionLabel] = useState<string>("Ready when you are");
+  const [audioUnavailableReason, setAudioUnavailableReason] = useState<string | undefined>();
   const [subtitles, setSubtitles] = useState("");
+  const [canReplayResponse, setCanReplayResponse] = useState(false);
+  const [liveTranscript, setLiveTranscript] = useState("");
   const [voicePhase, setVoicePhase] = useState<VoicePhase>("checking");
+  const voiceFailureStageRef = useRef<VoiceFailureStage | null>(null);
+  const [voiceFailureStage, setVoiceFailureStageState] = useState<VoiceFailureStage | null>(null);
+  const setVoiceFailureStage = (stage: VoiceFailureStage | null) => {
+    voiceFailureStageRef.current = stage;
+    setVoiceFailureStageState(stage);
+  };
+  const [transcriptFinalized, setTranscriptFinalized] = useState(false);
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "agent",
-      text: "Assalam-o-Alaikum! Welcome to Awaaz Estate. Speak directly or click any action node around the orbit to begin.",
-      time: stamp(),
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [conversationCopyStatus, setConversationCopyStatus] = useState("");
   const [matches, setMatches] = useState<string[]>([]);
+  const [inventoryProperties, setInventoryProperties] = useState<Property[]>([]);
+  const [inventoryLoadState, setInventoryLoadState] = useState<InventoryLoadState>("loading");
+  const [inventoryRefreshKey, setInventoryRefreshKey] = useState(0);
   const [propertyDetails, setPropertyDetails] = useState<Record<string, Property>>({});
+  const [loadingPropertyIds, setLoadingPropertyIds] = useState<string[]>([]);
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [connecting, setConnecting] = useState(false);
-  const [voiceMode] = useState<VoiceMode>("openai");
   const [language, setLanguage] = useState<"ur-Latn" | "ur-Arab" | "en" | "hi" | "ar" | "pa" | "bn">("ur-Latn");
-  const [audioAvailable, setAudioAvailable] = useState(false);
+  const voiceMode: VoiceMode = voiceModeForLanguage(language);
+  const audioAvailableRef = useRef(false);
+  const [audioAvailable, setAudioAvailableState] = useState(false);
+  const setAudioAvailable = (available: boolean) => {
+    audioAvailableRef.current = available;
+    setAudioAvailableState(available);
+  };
+  const [microphoneSignal, setMicrophoneSignal] = useState<"checking" | "detected" | "silent">("checking");
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [selectedInputId, setSelectedInputId] = useState("");
   const [audioOutputUnavailable, setAudioOutputUnavailable] = useState(false);
+  const audioOutputUnavailableRef = useRef(false);
   const [appointmentStatus, setAppointmentStatus] = useState("");
   const [appointmentTone, setAppointmentTone] = useState<FeedbackTone>("info");
   const [runtimeReadiness, setRuntimeReadiness] = useState<RuntimeReadiness | null>(null);
+  const [readinessCheckFailed, setReadinessCheckFailed] = useState(false);
+  const [readinessRefreshKey, setReadinessRefreshKey] = useState(0);
   const [selectedPropertyId, setSelectedPropertyId] = useState<string>("");
   const [showDrawer, setShowDrawer] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(false);
   const [comparedPropertyIds, setComparedPropertyIds] = useState<string[]>([]);
   const [showCompareHUD, setShowCompareHUD] = useState(false);
-  const [showMapRadar, setShowMapRadar] = useState(false);
+  const [showLocations, setShowLocations] = useState(false);
   const [showMortgageCalc, setShowMortgageCalc] = useState(false);
-  const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null);
-  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  const [lastTiming, setLastTiming] = useState<{ label: string; milliseconds: number } | null>(null);
+  const [agentDecisionLatencyMs, setAgentDecisionLatencyMs] = useState<number | null>(null);
+  const [substantiveAnswerLatencyMs, setSubstantiveAnswerLatencyMs] = useState<number | null>(null);
   const [audioAnalyser, setAudioAnalyser] = useState<AnalyserNode | null>(null);
-  const stageRef = useRef<HTMLDivElement | null>(null);
   const httpTurnAbort = useRef<AbortController | null>(null);
-
-  const getTomorrowDefaultIso = () => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    d.setHours(11, 0, 0, 0);
-    return d.toISOString().slice(0, 16);
-  };
 
   const [appointmentForm, setAppointmentForm] = useState({
     client_name: "",
     contact_email: "",
     contact_phone: "",
-    starts_at: getTomorrowDefaultIso(),
-    consent: true,
+    starts_at: defaultVisitSlot(),
+    consent: false,
   });
 
   const conversationId = useRef(
     typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `conv-${Date.now()}`
   );
   const bookingDialog = useRef<HTMLDialogElement | null>(null);
+  const textInputRef = useRef<HTMLInputElement | null>(null);
+  const settingsDialog = useNativeDialog(showSettingsModal);
   const replayAudio = useRef(new BoundedAudioReplay());
   const capture = useRef<BrowserAudioCapture | null>(null);
   const finishSpeech = useRef<(() => void) | null>(null);
+  const voiceTurnEndedAt = useRef<number | null>(null);
+  const answerAudioOriginAt = useRef<number | null>(null);
+  const voiceTimingOrigin = useRef<"voice" | "text" | null>(null);
   const selectedInputRef = useRef("");
-  const playback = useRef(new BrowserAudioPlayback());
+  const acknowledgementAudioPending = useRef(false);
+  const playback = useRef(new BrowserAudioPlayback({
+    onStart: () => {
+      if (voiceTurnEndedAt.current !== null) {
+        const origin = voiceTimingOrigin.current;
+        const wasAcknowledgement = acknowledgementAudioPending.current;
+        setLastTiming({
+          label: wasAcknowledgement ? "Voice → acknowledgement" : origin === "text" ? "Text → audio" : "Voice → audio",
+          milliseconds: Math.round(performance.now() - voiceTurnEndedAt.current),
+        });
+        voiceTurnEndedAt.current = null;
+        voiceTimingOrigin.current = null;
+      }
+      setVoicePhase("speaking");
+      setActiveActionLabel(acknowledgementAudioPending.current
+        ? "I heard you. Checking the live details now…"
+        : "Awaaz is speaking. You can interrupt at any time.");
+      acknowledgementAudioPending.current = false;
+    },
+    onDrain: () => {
+      const captureReady = audioAvailableRef.current && voiceFailureStageRef.current === null;
+      setVoicePhase(serverPhase.current === "listening"
+        ? captureReady ? "listening" : "starting_microphone"
+        : "thinking");
+      if (serverPhase.current === "listening" && captureReady && !audioOutputUnavailableRef.current) {
+        setActiveActionLabel("Listening for your request");
+      }
+    },
+    onError: () => {
+      audioOutputUnavailableRef.current = true;
+      setAudioOutputUnavailable(true);
+      setVoiceFailureStage("playback");
+      setVoicePhase("error");
+      setActiveActionLabel("Audio did not play. The reply text is available below.");
+    },
+  }));
   const responses = useRef(new VoiceResponseTracker());
   const serverPhase = useRef<VoicePhase>("idle");
   const sttRestarts = useRef(0);
   const languageRef = useRef(language);
   const voiceModeRef = useRef<VoiceMode>(voiceMode);
+  const reconnectAfterLanguageChange = useRef(false);
+  const sessionRequestedRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
   const chatBottomRef = useRef<HTMLDivElement | null>(null);
 
   const connected = socket?.readyState === WebSocket.OPEN;
-  const readinessKey = voiceMode === "openai" ? "openai_voice_ready" : "standard_voice_ready";
+  const sessionReady = connected && voicePhase !== "authenticating";
+  const readinessKey = voiceMode === "openai"
+    ? "openai_voice_ready"
+    : voiceMode === "hybrid" ? "hybrid_voice_ready" : "standard_voice_ready";
   const voiceReady = runtimeReadiness?.providers[readinessKey] === true;
-  const displayVoicePhase: VoicePhase = audioOutputUnavailable ? "error" : voicePhase;
+  const displayVoicePhase = resolveDisplayedVoicePhase(voicePhase, voiceFailureStage, audioOutputUnavailable, audioAvailable) as VoicePhase;
+  const connectionStatus = resolveVoiceConnectionStatus(
+    connected,
+    voiceReady,
+    voiceFailureStage,
+    audioAvailable,
+    runtimeReadiness === null && !readinessCheckFailed,
+    runtimeReadiness?.voiceVerification,
+  );
+  const microphoneStageState = microphoneSignal === "silent"
+    ? "warning"
+    : audioAvailable ? "done" : voiceFailureStage === "microphone" ? "failed" : sessionReady ? "active" : "waiting";
+  const microphoneStageDetail = microphoneSignal === "silent"
+    ? "No sound detected"
+    : audioAvailable
+      ? microphoneSignal === "detected" ? "Input active · sound detected" : "Input active · speak now"
+      : voiceFailureStage === "microphone" ? "Check permission or device" : sessionReady ? "Starting input" : "Waiting";
+  const voiceStages = [
+    {
+      id: "session",
+      label: "Session",
+      state: sessionReady ? "done" : voiceFailureStage === "session" ? "failed" : connecting || connected ? "active" : "waiting",
+      detail: sessionReady ? "Connected" : voiceFailureStage === "session" ? "Connection failed" : connecting ? "Connecting" : connected ? "Authenticating" : "Waiting",
+    },
+    {
+      id: "microphone",
+      label: "Microphone",
+      state: microphoneStageState,
+      detail: microphoneStageDetail,
+    },
+    {
+      id: "transcription",
+      label: "Speech",
+      state: transcriptFinalized ? "done" : voiceFailureStage === "transcription" ? "failed" : audioAvailable ? "active" : "waiting",
+      detail: transcriptFinalized ? "Recognized" : voiceFailureStage === "transcription" ? "Recognition failed" : audioAvailable ? "Waiting for speech" : "Waiting",
+    },
+    {
+      id: "agent",
+      label: "Agent reply",
+      state: subtitles ? "done" : voiceFailureStage === "agent" ? "failed" : transcriptFinalized ? "active" : "waiting",
+      detail: subtitles ? "Reply ready" : voiceFailureStage === "agent" ? "Reply failed" : transcriptFinalized ? "Generating" : "Waiting",
+    },
+    {
+      id: "playback",
+      label: "Voice output",
+      state: audioOutputUnavailable ? "failed" : canReplayResponse || (Boolean(subtitles) && displayVoicePhase === "listening") ? "done" : subtitles ? "active" : "waiting",
+      detail: audioOutputUnavailable ? "Audio unavailable" : canReplayResponse || (Boolean(subtitles) && displayVoicePhase === "listening") ? "Audio ready" : subtitles ? "Preparing audio" : "Waiting",
+    },
+  ] as const;
+  const availableMatches = matches.filter((id) => canRequestVisit(propertyDetails[id]));
+  const hasAvailableListings = inventoryProperties.some((property) => canRequestVisit(property));
+  const inventoryStatus = inventoryStatusSummary(inventoryLoadState, inventoryProperties);
+  const compactInventoryLabel = inventoryStatus.tone === "ready"
+    ? `${inventoryProperties.filter(canRequestVisit).length} live`
+    : inventoryStatus.tone === "loading" ? "Loading"
+      : inventoryStatus.tone === "error" ? "Offline" : "0 listings";
+  const appointmentSlotError = visitSlotError(appointmentForm.starts_at);
 
   useEffect(() => {
     voiceModeRef.current = voiceMode;
   }, [voiceMode]);
 
   useEffect(() => {
+    if (!reconnectAfterLanguageChange.current || socket || connecting) return;
+    reconnectAfterLanguageChange.current = false;
+    void connect();
+  }, [connecting, socket, voiceMode]);
+
+  useEffect(() => {
+    if (!showDrawer || (messages.length === 0 && matches.length === 0)) return;
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, matches, showDrawer]);
 
   // Load properties preview
   useEffect(() => {
     void fetch(`${apiUrl}/v1/properties`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((data: Property[]) => {
-        if (Array.isArray(data) && data.length > 0) {
-          const map: Record<string, Property> = {};
-          const ids: string[] = [];
-          for (const item of data.slice(0, 4)) {
-            map[item.id] = item;
-            ids.push(item.id);
-          }
-          setPropertyDetails(map);
-          setMatches(ids);
-          setSelectedPropertyId(ids[0] ?? "");
-        } else {
-          setPropertyDetails({});
-          setMatches([]);
-          setSelectedPropertyId("");
-        }
+      .then((res) => {
+        if (!res.ok) throw new Error(`Inventory request failed (${res.status})`);
+        return res.json();
       })
-      .catch(() => undefined);
-  }, []);
+      .then((data: Property[]) => {
+        if (!Array.isArray(data)) throw new Error("Inventory response was not a list");
+        setInventoryProperties(data);
+        setInventoryLoadState("ready");
+      })
+      .catch(() => setInventoryLoadState("error"));
+  }, [inventoryRefreshKey]);
 
   // Check server readiness
   useEffect(() => {
@@ -215,18 +371,13 @@ function App() {
       try {
         const response = await fetch(`${apiUrl}/readyz`);
         if (!response.ok) throw new Error("Readiness check failed");
-        const value = await response.json();
-        const rawProviders = value.providers || {};
-        const providers = Object.fromEntries(
-          Object.entries(rawProviders).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean")
-        );
+        const value: unknown = await response.json();
+        const readiness = parseRuntimeReadiness(value);
+        if (!readiness) throw new Error("Readiness response was invalid");
         if (!active) return;
-        const configured = providers[readinessKey] === true;
-        setRuntimeReadiness({
-          ready: value.status === "ready",
-          mode: value.mode || "unknown",
-          providers,
-        });
+        const configured = readiness.providers[readinessKey] === true;
+        setReadinessCheckFailed(false);
+        setRuntimeReadiness(readiness);
         setVoicePhase((current) =>
           ["connecting", "authenticating", "listening", "thinking", "speaking", "error"].includes(current)
             ? current
@@ -234,6 +385,7 @@ function App() {
         );
       } catch {
         if (active) {
+          setReadinessCheckFailed(true);
           setRuntimeReadiness(null);
           setVoicePhase("blocked");
         }
@@ -245,36 +397,81 @@ function App() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [readinessKey]);
+  }, [readinessKey, readinessRefreshKey]);
 
   function changeLanguage(next: "ur-Latn" | "ur-Arab" | "en" | "hi" | "ar" | "pa" | "bn") {
+    const modeChanged = voiceModeForLanguage(next) !== voiceModeRef.current;
+    const wasConnected = socket?.readyState === WebSocket.OPEN;
+    if (modeChanged && wasConnected) {
+      reconnectAfterLanguageChange.current = true;
+      disconnect();
+      setActiveActionLabel("Switching voice services for the selected language…");
+    }
     setLanguage(next);
     languageRef.current = next;
-    if (socket?.readyState === WebSocket.OPEN) {
+    voiceModeRef.current = voiceModeForLanguage(next);
+    if (!modeChanged && socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "set_language", language: next }));
     }
+  }
+
+  function loadMatchedProperties(ids: string[]) {
+    if (ids.length === 0) return;
+    setLoadingPropertyIds((current) => [...new Set([...current, ...ids])]);
+    void Promise.all(ids.map(async (id) => {
+      try {
+        const response = await fetch(`${apiUrl}/v1/properties/${encodeURIComponent(id)}`);
+        if (!response.ok) return null;
+        return await response.json() as Property;
+      } catch {
+        return null;
+      }
+    })).then((items) => {
+      setPropertyDetails((current) => ({
+        ...current,
+        ...Object.fromEntries(items.filter((item): item is Property => item !== null).map((item) => [item.id, item])),
+      }));
+    }).finally(() => {
+      setLoadingPropertyIds((current) => current.filter((id) => !ids.includes(id)));
+    });
   }
 
   async function startCapture(ws: WebSocket, mode: VoiceMode) {
     const nextCapture = new BrowserAudioCapture();
     capture.current = nextCapture;
+    setMicrophoneSignal("checking");
     const inputGate = new VoiceInputGate();
     let audioSessionStarted = false;
     let stoppedForBackpressure = false;
     let manuallyCommitted = false;
+    let firstCaptureFrameSeen = false;
     let silentInputMs = 0;
     let inputSignalSeen = false;
     finishSpeech.current = () => {
       if (capture.current !== nextCapture || ws.readyState !== WebSocket.OPEN) return;
       manuallyCommitted = true;
+      voiceTurnEndedAt.current = performance.now();
+      answerAudioOriginAt.current = voiceTurnEndedAt.current;
+      voiceTimingOrigin.current = "voice";
       inputGate.end();
       ws.send(JSON.stringify({ type: "audio_turn_end" }));
-      setActiveActionLabel("LIVE ACTION: PROCESSING YOUR SPEECH");
+      setActiveActionLabel("Processing your speech…");
     };
     try {
       await nextCapture.start(
         (chunk) => {
           if (stoppedForBackpressure || capture.current !== nextCapture) return;
+          if (!firstCaptureFrameSeen) {
+            firstCaptureFrameSeen = true;
+            reconnectAttemptRef.current = 0;
+            setAudioAvailable(true);
+            setVoiceFailureStage(null);
+            setAudioAnalyser(nextCapture.getAnalyser());
+            if (serverPhase.current === "listening") {
+              setVoicePhase("listening");
+              setActiveActionLabel("Microphone connected. Speak naturally.");
+            }
+          }
           const uplinkState = audioUplinkState(ws.readyState, ws.bufferedAmount);
           if (uplinkState !== "ready") {
             stoppedForBackpressure = true;
@@ -285,7 +482,7 @@ function App() {
               ws.send(JSON.stringify({ type: "audio_end" }));
             }
             setAudioAvailable(false);
-            setActiveActionLabel("VOICE PAUSED — CONNECTION SLOW");
+            setActiveActionLabel("Voice paused because the connection is slow.");
             return;
           }
           try {
@@ -297,7 +494,7 @@ function App() {
             if (capture.current === nextCapture) capture.current = null;
             finishSpeech.current = null;
             setAudioAvailable(false);
-            setActiveActionLabel("MICROPHONE STREAM PAUSED");
+            setActiveActionLabel("Microphone stream paused. Try reconnecting.");
           }
         },
         () => {
@@ -306,17 +503,28 @@ function App() {
           ws.send(JSON.stringify({ type: "audio_start", sample_rate: 16_000, encoding: "linear16" }));
           audioSessionStarted = true;
         },
-        mode === "openai"
+        mode === "openai" || mode === "hybrid"
           ? {
               onSpeechStart: () => {
                 manuallyCommitted = false;
+                voiceTurnEndedAt.current = null;
+                answerAudioOriginAt.current = null;
+                voiceTimingOrigin.current = null;
+                setVoiceFailureStage(null);
+                setTranscriptFinalized(false);
+                setSubtitles("");
+                setCanReplayResponse(false);
+                audioOutputUnavailableRef.current = false;
+                setAudioOutputUnavailable(false);
                 responses.current.interrupt();
                 playback.current.stop();
                 setVoicePhase("listening");
-                setActiveActionLabel("LIVE ACTION: USER SPEAKING INTO ORBIT");
+                setActiveActionLabel("Listening to your voice");
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(JSON.stringify({ type: "audio_turn_start" }));
-                  for (const frame of inputGate.start()) ws.send(frame);
+                  if (mode === "openai") {
+                    for (const frame of inputGate.start()) ws.send(frame);
+                  }
                 }
               },
               onSpeechEnd: () => {
@@ -325,17 +533,22 @@ function App() {
                   manuallyCommitted = false;
                   return;
                 }
-                setActiveActionLabel("LIVE ACTION: PROCESSING NEURAL TURN");
+                voiceTurnEndedAt.current = performance.now();
+                answerAudioOriginAt.current = voiceTurnEndedAt.current;
+                voiceTimingOrigin.current = "voice";
+                setActiveActionLabel("Working on your request…");
                 if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "audio_turn_end" }));
               },
               onLevel: (rms, frameMs) => {
                 if (inputSignalSeen) return;
                 if (rms >= 0.0001) {
                   inputSignalSeen = true;
+                  setMicrophoneSignal("detected");
                 } else {
                   silentInputMs += frameMs;
                   if (silentInputMs >= 4_000 && silentInputMs - frameMs < 4_000) {
-                    setActiveActionLabel("NO MIC SOUND DETECTED — SPEAK OR SELECT MICROPHONE");
+                    setMicrophoneSignal("silent");
+                    setActiveActionLabel("No microphone sound yet. Check your input device.");
                   }
                 }
               },
@@ -345,7 +558,9 @@ function App() {
                 finishSpeech.current = null;
                 setAudioAvailable(false);
                 setAudioAnalyser(null);
-                setActiveActionLabel("MICROPHONE STREAM STOPPED — RESTART VOICE CHAT");
+                setVoiceFailureStage("microphone");
+                setVoicePhase("error");
+                setActiveActionLabel("Microphone stopped. Reconnect to continue.");
                 if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "audio_end" }));
               },
             }
@@ -359,13 +574,15 @@ function App() {
         setAudioAnalyser(null);
         return;
       }
-      setAudioAvailable(true);
       setAudioAnalyser(nextCapture.getAnalyser());
-      setActiveActionLabel("LIVE ORBITAL LINK ACTIVE — SPEAK FREELY");
+      if (!firstCaptureFrameSeen && voiceFailureStageRef.current === null) {
+        setVoicePhase("starting_microphone");
+        setActiveActionLabel("Starting microphone…");
+      }
       void navigator.mediaDevices.enumerateDevices()
         .then((devices) => setAudioInputs(devices.filter((device) => device.kind === "audioinput")))
         .catch(() => undefined);
-    } catch {
+    } catch (error: unknown) {
       nextCapture.stop();
       if (capture.current === nextCapture) capture.current = null;
       finishSpeech.current = null;
@@ -374,7 +591,9 @@ function App() {
       }
       setAudioAvailable(false);
       setAudioAnalyser(null);
-      setActiveActionLabel("MICROPHONE UNAVAILABLE — TYPE IN COMMAND DOCK");
+      setVoiceFailureStage("microphone");
+      setVoicePhase("error");
+      setActiveActionLabel(microphoneFailureMessage(error));
     }
   }
 
@@ -389,11 +608,22 @@ function App() {
     void startCapture(socket, voiceModeRef.current);
   }
 
-  async function connect() {
-    if (connecting || connected) return;
+  async function connect(force = false, automaticReconnect = false) {
+    if (!automaticReconnect) {
+      sessionRequestedRef.current = true;
+      reconnectAttemptRef.current = 0;
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+    }
+    if (connecting || (connected && !force)) return;
+    setShowDrawer(true);
     setConnecting(true);
+    setVoiceFailureStage(null);
+    setTranscriptFinalized(false);
     setVoicePhase("connecting");
-    setActiveActionLabel("ACTION: INITIALIZING ORBITAL VOICE SESSION…");
+    setActiveActionLabel("Connecting to the voice service…");
     void playback.current.activate().catch(() => undefined);
     try {
       const sessionResponse = await fetch(`${apiUrl}/v1/voice/session`, {
@@ -411,13 +641,21 @@ function App() {
       }
       responses.current.reset();
       sttRestarts.current = 0;
+      setLiveTranscript("");
+      setSubtitles("");
+      setCanReplayResponse(false);
+      setTranscriptFinalized(false);
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
       ws.onopen = () => {
         setConnecting(false);
         setVoicePhase("authenticating");
-        setActiveActionLabel("ACTION: AUTHENTICATING ORBITAL LINK…");
-        ws.send(JSON.stringify({ type: "authenticate", ticket: session.ticket }));
+        setActiveActionLabel("Securing your voice session…");
+        ws.send(JSON.stringify({
+          type: "authenticate",
+          ticket: session.ticket,
+          language: languageRef.current,
+        }));
         ws.send(JSON.stringify({ type: "set_language", language: languageRef.current }));
         const hasConsentedContact =
           appointmentForm.consent &&
@@ -436,7 +674,7 @@ function App() {
               : null,
           })
         );
-        setActiveActionLabel("ORBITAL LINK ESTABLISHED — READY");
+        setActiveActionLabel("Connected. Listening is starting…");
       };
       ws.onclose = (event) => {
         if (event.code !== 1000) {
@@ -450,24 +688,43 @@ function App() {
         finishSpeech.current = null;
         setSocket(null);
         setAudioAvailable(false);
+        setMicrophoneSignal("checking");
+        if (shouldAutoReconnectVoice(event.code, sessionRequestedRef.current, reconnectAttemptRef.current)) {
+          reconnectAttemptRef.current += 1;
+          const attempt = reconnectAttemptRef.current;
+          const delay = voiceReconnectDelayMs(attempt);
+          setVoiceFailureStage(null);
+          setVoicePhase("connecting");
+          setActiveActionLabel(`Voice connection interrupted. Reconnecting (${attempt}/3)…`);
+          reconnectTimerRef.current = window.setTimeout(() => {
+            reconnectTimerRef.current = null;
+            if (sessionRequestedRef.current) void connect(true, true);
+          }, delay);
+          return;
+        }
+        sessionRequestedRef.current = false;
         if (event.code === 1013) {
+          setVoiceFailureStage("session");
           setVoicePhase("error");
-          setActiveActionLabel(event.reason || "VOICE SERVICE BUSY — RETRY SHORTLY");
+          setActiveActionLabel(event.reason || "Voice service is busy. Please retry shortly.");
         } else if (event.code === 1008) {
+          setVoiceFailureStage("session");
           setVoicePhase("error");
-          setActiveActionLabel(event.reason ? `REJECTED: ${event.reason}` : "AUTHENTICATION FAILED");
+          setActiveActionLabel(event.reason ? `Voice session rejected: ${event.reason}` : "Voice session authentication failed.");
         } else if (event.code !== 1000) {
+          setVoiceFailureStage("session");
           setVoicePhase("error");
-          setActiveActionLabel(event.reason ? `DISCONNECTED (${event.code}): ${event.reason}` : `VOICE CONNECTION LOST (${event.code}) — CHECK API AND NETWORK`);
+          setActiveActionLabel(event.reason ? `Voice connection lost: ${event.reason}` : `Voice connection lost (${event.code}). Check the service and network.`);
         } else {
           setVoicePhase("idle");
-          setActiveActionLabel("ORBITAL SESSION CLOSED — READY");
+          setActiveActionLabel("Voice session ended");
         }
       };
       ws.onerror = () => {
         setConnecting(false);
+        setVoiceFailureStage("session");
         setVoicePhase("error");
-        setActiveActionLabel(`CONNECTION ERROR: COULD NOT REACH ${wsUrl}`);
+        setActiveActionLabel(`Could not reach the voice service at ${new URL(wsUrl).host}.`);
       };
       ws.onmessage = (messageEvent) => {
         const raw: unknown = messageEvent.data;
@@ -477,62 +734,117 @@ function App() {
         if (shouldInterruptPlayback(event)) playback.current.stop();
         if (event.type === "state" && event.state) {
           const nextPhase = (event.state === "processing" ? "thinking" : event.state) as VoicePhase;
+          if (event.interrupt_playback || nextPhase === "thinking") {
+            setVoiceFailureStage(null);
+            setAudioUnavailableReason(undefined);
+            setTranscriptFinalized(false);
+            setLiveTranscript("");
+            setSubtitles("");
+            setCanReplayResponse(false);
+            audioOutputUnavailableRef.current = false;
+            setAudioOutputUnavailable(false);
+          }
           serverPhase.current = nextPhase;
-          setVoicePhase(nextPhase);
-          if (nextPhase === "listening") setActiveActionLabel("LIVE ACTION: ORBIT LISTENING TO SPEECH");
+          if (shouldApplyServerVoicePhase(
+            nextPhase,
+            voiceFailureStageRef.current,
+            audioAvailableRef.current,
+          )) {
+            if (nextPhase === "thinking" && playback.current.isActive) setVoicePhase("speaking");
+            else if (nextPhase !== "listening" || !playback.current.isActive) setVoicePhase(nextPhase);
+          } else if (
+            nextPhase === "listening"
+            && voiceFailureStageRef.current === null
+            && !audioAvailableRef.current
+          ) {
+            setVoicePhase("starting_microphone");
+            setActiveActionLabel("Starting microphone…");
+          }
+          if (
+            nextPhase === "listening"
+            && !audioOutputUnavailableRef.current
+            && voiceFailureStageRef.current === null
+            && audioAvailableRef.current
+          ) setActiveActionLabel("Listening for your request");
           if (typeof event.audio_input_available === "boolean") {
-            if (event.audio_input_available && !capture.current) void startCapture(ws, voiceModeRef.current);
+            if (
+              event.audio_input_available
+              && !capture.current
+              && voiceFailureStageRef.current === null
+            ) void startCapture(ws, voiceModeRef.current);
           }
         }
         if (event.type === "transcript" && !event.is_final && event.text) {
-          setActiveActionLabel(`HEARING: ${event.text.slice(-120)}`);
+          setLiveTranscript(event.text);
+          setActiveActionLabel(`Hearing: ${event.text.slice(-120)}`);
         }
         if (event.type === "transcript" && event.is_final && event.speech_final && event.text) {
           sttRestarts.current = 0;
-          setVoicePhase("thinking");
-          setActiveActionLabel(`USER SAID: "${event.text}"`);
+          setLiveTranscript(event.text);
+          setTranscriptFinalized(true);
+          setShowDrawer(true);
+          setVoicePhase(playback.current.isActive ? "speaking" : "thinking");
+          setAgentDecisionLatencyMs(null);
+          setSubstantiveAnswerLatencyMs(null);
+          setActiveActionLabel(`You said: “${event.text}”`);
           setMessages((current) => [...current, { role: "customer", text: event.text ?? "", time: stamp() }]);
         }
         if (event.type === "agent_response" && event.decision) {
-          setVoicePhase("thinking");
-          playback.current.stop();
+          if (event.reasoning_status) {
+            setRuntimeReadiness((current) => current
+              ? {
+                ...current,
+                reasoningStatus: event.reasoning_status ?? current.reasoningStatus,
+                reasoningFailureCategory: typeof event.reasoning_failure_category === "string"
+                  ? event.reasoning_failure_category
+                  : current.reasoningFailureCategory,
+              }
+              : current);
+          }
+          setVoicePhase(playback.current.isActive ? "speaking" : "thinking");
           const text = event.decision.spoken_text;
           setSubtitles(text);
+          setCanReplayResponse(false);
           replayAudio.current.reset();
+          audioOutputUnavailableRef.current = false;
           setAudioOutputUnavailable(false);
           setMessages((current) => [...current, { role: "agent", text, time: stamp() }]);
-          if (typeof event.latency_ms === "number") setLastLatencyMs(Math.round(event.latency_ms));
+          const transcriptionRecovery = event.decision.reason === "transcription_incomplete";
+          if (transcriptionRecovery) {
+            answerAudioOriginAt.current = null;
+            setSubstantiveAnswerLatencyMs(null);
+            setAgentDecisionLatencyMs(null);
+            setActiveActionLabel(text || "I didn’t catch the whole request. Please say it again.");
+          } else if (typeof event.latency_ms === "number") {
+            setAgentDecisionLatencyMs(Math.round(event.latency_ms));
+          }
           const ids = event.decision.property_ids ?? [];
           if (ids.length > 0) {
-            setActiveActionLabel(`ACTION: FOUND ${ids.length} VERIFIED PROPERTIES`);
+            setActiveActionLabel(`Found ${ids.length} available ${ids.length === 1 ? "property" : "properties"}`);
             setMatches(ids);
             if (!selectedPropertyId) setSelectedPropertyId(ids[0]);
-            void Promise.all(
-              ids.map(async (id) => {
-                const response = await fetch(`${apiUrl}/v1/properties/${encodeURIComponent(id)}`);
-                if (!response.ok) return null;
-                return (await response.json()) as Property;
-              })
-            ).then((items) =>
-              setPropertyDetails((current) => ({
-                ...current,
-                ...Object.fromEntries(
-                  items.filter((item): item is Property => item !== null).map((item) => [item.id, item])
-                ),
-              }))
-            );
-          } else {
-            setActiveActionLabel("PREPARING SPOKEN REPLY…");
+            loadMatchedProperties(ids);
+          } else if (!transcriptionRecovery) {
+            setActiveActionLabel("Preparing your spoken reply…");
           }
         }
+        if (event.type === "transcript_low_confidence") {
+          playback.current.finish();
+          setLiveTranscript(event.text ?? "");
+          setVoicePhase("listening");
+          setActiveActionLabel("I didn’t hear that clearly. Please say it again.");
+        }
         if (event.type === "agent_unavailable") {
+          playback.current.finish();
+          setVoiceFailureStage("agent");
           setVoicePhase("error");
-          setActiveActionLabel("AGENT COULD NOT FINISH — PLEASE REPEAT THAT");
+          setActiveActionLabel("I could not finish that response. Please try again.");
         }
         if (event.type === "stt_unavailable") {
+          playback.current.finish();
           if (event.restart_required && event.recoverable && sttRestarts.current < 2 && capture.current) {
             sttRestarts.current += 1;
-            setActiveActionLabel("RECONNECTING SPEECH RECOGNITION — PLEASE REPEAT");
+            setActiveActionLabel("Reconnecting speech recognition. Please repeat.");
             window.setTimeout(() => {
               if (ws.readyState === WebSocket.OPEN && capture.current) {
                 ws.send(JSON.stringify({ type: "audio_start", sample_rate: 16_000, encoding: "linear16" }));
@@ -543,13 +855,18 @@ function App() {
             capture.current = null;
             finishSpeech.current = null;
             setAudioAvailable(false);
+            setVoiceFailureStage("transcription");
             setVoicePhase("error");
-            setActiveActionLabel("SPEECH RECOGNITION UNAVAILABLE — RESTART VOICE OR TYPE");
+            setActiveActionLabel(resolveSttUnavailableMessage(event.reason));
           }
         }
         if (event.type === "audio_unavailable") {
+          playback.current.finish();
+          audioOutputUnavailableRef.current = true;
           setAudioOutputUnavailable(true);
-          setActiveActionLabel("REPLY TEXT IS READY — SPOKEN AUDIO IS UNAVAILABLE");
+          setVoiceFailureStage("playback");
+          setAudioUnavailableReason(event.reason);
+          setActiveActionLabel(resolveAudioUnavailableMessage(event.reason));
         }
         if (event.type === "appointment_result") {
           setAppointmentTone("pending");
@@ -557,10 +874,17 @@ function App() {
             : event.action === "reschedule" ? "RESCHEDULE REQUESTED" : "VISIT REQUESTED";
           const msg = `${actionLabel}: REF ${event.reference ?? ""} — CALENDAR/EMAIL PENDING`;
           setAppointmentStatus(msg);
-          setActiveActionLabel(`ACTION: ${msg}`);
+          setShowDrawer(true);
+          setActiveActionLabel(msg);
         }
         if (event.type === "audio_chunk") {
-          setVoicePhase("speaking");
+          if (event.acknowledgement) acknowledgementAudioPending.current = true;
+          if (event.audio_base64 && !event.acknowledgement && answerAudioOriginAt.current !== null) {
+            setSubstantiveAnswerLatencyMs(
+              Math.round(performance.now() - answerAudioOriginAt.current),
+            );
+            answerAudioOriginAt.current = null;
+          }
           if (event.encoding && event.sample_rate) {
             replayAudio.current.append({
               audio: event.audio_base64 ?? "",
@@ -571,88 +895,50 @@ function App() {
           }
           if (event.encoding === "audio/mpeg") playback.current.enqueueEncoded(event.audio_base64 ?? "", event.is_final ?? false);
           else if (event.audio_base64 && event.sample_rate) playback.current.playPcm16(event.audio_base64, event.sample_rate);
+          if (event.is_final) {
+            if (event.encoding !== "audio/mpeg") playback.current.finish();
+            setCanReplayResponse(replayAudio.current.canReplay);
+          }
         }
       };
       setSocket(ws);
     } catch (err: unknown) {
       setConnecting(false);
+      setVoiceFailureStage("session");
       setVoicePhase("error");
       const msg = err instanceof Error ? err.message : "Failed to connect";
-      setActiveActionLabel(`ERROR: ${msg}`);
-    }
-  }
-
-  function playFuturisticTone(type: "listening" | "action" | "speaking") {
-    if (typeof window === "undefined") return;
-    try {
-      const AudioCtx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      const now = ctx.currentTime;
-      if (type === "listening") {
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(440, now);
-        osc.frequency.exponentialRampToValueAtTime(880, now + 0.12);
-        gain.gain.setValueAtTime(0.08, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
-        osc.start(now);
-        osc.stop(now + 0.25);
-      } else if (type === "action") {
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(587.33, now);
-        osc.frequency.setValueAtTime(880, now + 0.08);
-        osc.frequency.setValueAtTime(1174.66, now + 0.16);
-        gain.gain.setValueAtTime(0.06, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-        osc.start(now);
-        osc.stop(now + 0.3);
-      } else if (type === "speaking") {
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(659.25, now);
-        gain.gain.setValueAtTime(0.05, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
-        osc.start(now);
-        osc.stop(now + 0.2);
-      }
-    } catch {
-      // AudioContext may require gesture
-    }
-  }
-
-  function detectAndHighlightAction(text: string) {
-    const t = text.toLowerCase();
-    if (t.includes("karachi") || t.includes("clifton") || t.includes("2-bed") || t.includes("flat") || t.includes("sea view")) {
-      setActiveNodeId("karachi-trends");
-      setActiveActionLabel("ORBIT PERFORMING: KARACHI TRENDS QUERY");
-    } else if (t.includes("lahore") || t.includes("gulberg") || t.includes("villa") || t.includes("house")) {
-      setActiveNodeId("lahore-hotspots");
-      setActiveActionLabel("ORBIT PERFORMING: LAHORE HOTSPOTS QUERY");
-    } else if (t.includes("islamabad") || t.includes("blue area") || t.includes("commercial") || t.includes("office") || t.includes("shop")) {
-      setActiveNodeId("islamabad-prime");
-      setActiveActionLabel("ORBIT PERFORMING: ISLAMABAD COMMERCIAL QUERY");
-    } else if (t.includes("installment") || t.includes("payment") || t.includes("plan") || t.includes("qist") || t.includes("aqsaat")) {
-      setActiveNodeId("installment-plans");
-      setActiveActionLabel("ORBIT PERFORMING: PAYMENT PLANS QUERY");
-    } else if (t.includes("yield") || t.includes("roi") || t.includes("rental") || t.includes("kiraya") || t.includes("invest")) {
-      setActiveNodeId("rental-yield");
-      setActiveActionLabel("ORBIT PERFORMING: RENTAL YIELD CALCULATION");
-    } else if (t.includes("briefing") || t.includes("market") || t.includes("overview") || t.includes("update") || t.includes("aaj")) {
-      setActiveNodeId("daily-briefing");
-      setActiveActionLabel("ORBIT PERFORMING: DAILY MARKET BRIEFING");
-    } else if (t.includes("visit") || t.includes("schedule") || t.includes("book") || t.includes("dekhna") || t.includes("tour")) {
-      setActiveNodeId("schedule-visit");
-      setActiveActionLabel("ORBIT PERFORMING: SITE VISIT BOOKING");
+      setActiveActionLabel(msg);
     }
   }
 
   function unlockAudio() {
     void playback.current.activate().catch(() => undefined);
+  }
+
+  async function copyConversation() {
+    const transcript = messages
+      .map((message) => `${message.role === "agent" ? "Awaaz Estate" : "You"} (${message.time})\n${message.text}`)
+      .join("\n\n");
+    try {
+      await navigator.clipboard.writeText(transcript);
+      setConversationCopyStatus("Conversation copied");
+    } catch {
+      setConversationCopyStatus("Could not copy. Check browser clipboard permission.");
+    }
+  }
+
+  async function replayLastResponse() {
+    const chunks = replayAudio.current.snapshot();
+    if (chunks.length === 0) return;
+    playback.current.stop();
+    try {
+      await playback.current.activate();
+      enqueueReplay(chunks, playback.current);
+    } catch (error: unknown) {
+      setVoiceFailureStage("playback");
+      setVoicePhase("error");
+      setActiveActionLabel(error instanceof Error ? error.message : "Could not replay the voice response");
+    }
   }
 
   function handleCallToggle() {
@@ -667,16 +953,25 @@ function App() {
     unlockAudio();
     if (connected) {
       disconnect();
-    } else if (resolveLiveVoiceAction(voiceReady) === "connect") {
+    } else if (resolveLiveVoiceAction(runtimeReadiness === null && !readinessCheckFailed ? null : voiceReady) === "connect") {
       void connect();
     } else {
       setVoicePhase("blocked");
-      setActiveActionLabel("LIVE VOICE IS NOT READY — CHECK PROVIDER READINESS");
+      setActiveActionLabel(resolveVoiceNotReadyMessage(voiceModeRef.current));
     }
   }
 
   function disconnect() {
+    sessionRequestedRef.current = false;
+    reconnectAttemptRef.current = 0;
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     finishSpeech.current = null;
+    voiceTurnEndedAt.current = null;
+    answerAudioOriginAt.current = null;
+    voiceTimingOrigin.current = null;
     capture.current?.stop();
     capture.current = null;
     playback.current.stop();
@@ -686,17 +981,41 @@ function App() {
     closeVoiceSession(socket);
     setSocket(null);
     setAudioAvailable(false);
+    setMicrophoneSignal("checking");
+    setVoiceFailureStage(null);
+    setTranscriptFinalized(false);
+    setAudioOutputUnavailable(false);
+    audioOutputUnavailableRef.current = false;
     setVoicePhase("idle");
-    setActiveActionLabel("VOICE CALL DISCONNECTED — READY");
+    setActiveActionLabel("Voice call disconnected");
   }
 
-  async function performAction(queryText: string, actionLabel: string, nodeId?: string) {
+  function retryVoiceFailure() {
+    if (!voiceReady) {
+      setVoiceFailureStage(null);
+      setVoicePhase("blocked");
+      setActiveActionLabel(resolveVoiceNotReadyMessage(voiceModeRef.current));
+      return;
+    }
+    if (voiceFailureStage === "microphone" && socket?.readyState === WebSocket.OPEN) {
+      setVoiceFailureStage(null);
+      void startCapture(socket, voiceModeRef.current);
+      return;
+    }
+    if (voiceFailureStage === "playback" && canReplayResponse) {
+      setVoiceFailureStage(null);
+      void replayLastResponse();
+      return;
+    }
+    if (connected) disconnect();
+    setVoiceFailureStage(null);
+    void connect(true);
+  }
+
+  async function performAction(queryText: string, actionLabel: string) {
     unlockAudio();
-    if (nodeId) setActiveNodeId(nodeId);
-    else detectAndHighlightAction(queryText);
-    setActiveActionLabel(`ACTION: ${actionLabel.toUpperCase()}`);
+    setActiveActionLabel(actionLabel);
     setShowDrawer(true);
-    playFuturisticTone("action");
     await send(queryText);
   }
 
@@ -704,18 +1023,21 @@ function App() {
     const text = (overrideText ?? input).trim();
     if (!text) return;
     setInput("");
+    setShowDrawer(true);
     responses.current.interrupt();
     playback.current.stop();
     unlockAudio();
     setMessages((current) => [...current, { role: "customer", text, time: stamp() }]);
     setVoicePhase("thinking");
-    detectAndHighlightAction(text);
-    setActiveActionLabel(`PROCESSING: "${text.slice(0, 32)}…"`);
+    setActiveActionLabel("Working on your message…");
 
     // If WebSocket is active, send via real-time socket
     if (socket && socket.readyState === WebSocket.OPEN) {
       httpTurnAbort.current?.abort();
       httpTurnAbort.current = null;
+      voiceTurnEndedAt.current = performance.now();
+      answerAudioOriginAt.current = voiceTurnEndedAt.current;
+      voiceTimingOrigin.current = "text";
       socket.send(JSON.stringify({ type: "barge_in" }));
       socket.send(JSON.stringify({ type: "user_text", text, language }));
       return;
@@ -736,7 +1058,7 @@ function App() {
       if (httpTurnAbort.current !== controller) return;
       if (!response.ok) throw new Error(`Server returned ${response.status}`);
       const data = await response.json();
-      setLastLatencyMs(Math.round(performance.now() - start));
+      setLastTiming({ label: "Text request", milliseconds: Math.round(performance.now() - start) });
       const decision = data.decision || data;
       const reply =
         decision.spoken_text ||
@@ -746,7 +1068,7 @@ function App() {
         "Main aapki madad kar sakta hoon.";
       setSubtitles(reply);
       setMessages((current) => [...current, { role: "agent", text: reply, time: stamp() }]);
-      setActiveActionLabel("ACTION: RESPONSE DELIVERED");
+      setActiveActionLabel("Reply received");
       setVoicePhase("idle");
 
       const ids: string[] = decision.property_ids || data.property_ids || [];
@@ -754,27 +1076,13 @@ function App() {
         setMatches(ids);
         if (!selectedPropertyId) setSelectedPropertyId(ids[0]);
         setShowDrawer(true);
-        void Promise.all(
-          ids.map(async (id) => {
-            const r = await fetch(`${apiUrl}/v1/properties/${encodeURIComponent(id)}`);
-            if (!r.ok) return null;
-            return (await r.json()) as Property;
-          })
-        ).then((items) =>
-          setPropertyDetails((current) => ({
-            ...current,
-            ...Object.fromEntries(
-              items.filter((item): item is Property => item !== null).map((item) => [item.id, item])
-            ),
-          }))
-        );
+        loadMatchedProperties(ids);
       }
-      playFuturisticTone("speaking");
     } catch (error: unknown) {
       if (error instanceof Error && error.name === "AbortError") return;
       if (httpTurnAbort.current !== controller) return;
       setVoicePhase("error");
-      setActiveActionLabel("LIVE AI TURN FAILED — CHECK BACKEND AND PROVIDER STATUS");
+      setActiveActionLabel("The live assistant could not respond. Please try again.");
       setMessages((current) => [
         ...current,
         {
@@ -789,13 +1097,23 @@ function App() {
   }
 
   async function bookVisit() {
-    if (!selectedPropertyId || !propertyDetails[selectedPropertyId]) {
+    if (!appointmentForm.consent) {
       setAppointmentTone("error");
-      setAppointmentStatus("Import a real available property before requesting a visit.");
-      setActiveActionLabel("BOOKING BLOCKED — NO VERIFIED PROPERTY SELECTED");
+      setAppointmentStatus("Consent is required before sending a visit request.");
       return;
     }
-    setActiveActionLabel("ACTION: BOOKING SITE VISIT…");
+    if (appointmentSlotError) {
+      setAppointmentTone("error");
+      setAppointmentStatus(appointmentSlotError);
+      return;
+    }
+    if (!selectedPropertyId || !canRequestVisit(propertyDetails[selectedPropertyId])) {
+      setAppointmentTone("error");
+      setAppointmentStatus("Select a loaded, available listing before requesting a visit.");
+      setActiveActionLabel("A visit requires an available company listing.");
+      return;
+    }
+    setActiveActionLabel("Sending your visit request…");
     setAppointmentStatus("Scheduling site visit…");
     setAppointmentTone("pending");
     try {
@@ -812,7 +1130,7 @@ function App() {
             typeof crypto !== "undefined" && crypto.randomUUID
               ? crypto.randomUUID()
               : "00000000-0000-0000-0000-000000000001",
-          starts_at: appointmentForm.starts_at ? new Date(appointmentForm.starts_at).toISOString() : new Date(Date.now() + 86400000).toISOString(),
+          starts_at: visitSlotToIso(appointmentForm.starts_at),
           consent: true,
         }),
       });
@@ -820,7 +1138,9 @@ function App() {
       if (!response.ok) throw new Error(data.detail || "Booking failed");
       setAppointmentTone("pending");
       setAppointmentStatus(`Visit request recorded. Calendar confirmation pending — reference ${data.reference}.`);
-      setActiveActionLabel(`ACTION: VISIT REQUEST RECORDED (${data.reference})`);
+      setShowDrawer(true);
+      bookingDialog.current?.close();
+      setActiveActionLabel(`Visit request recorded. Reference ${data.reference}.`);
       setMessages((current) => [
         ...current,
         {
@@ -832,17 +1152,24 @@ function App() {
     } catch (err: unknown) {
       setAppointmentTone("error");
       setAppointmentStatus(err instanceof Error ? err.message : "Booking failed");
-      setActiveActionLabel("ACTION FAILED: COULD NOT BOOK VISIT");
+      setActiveActionLabel("The visit request could not be submitted.");
     }
   }
 
   function openBookingFor(propertyId: string) {
+    const property = propertyDetails[propertyId];
+    if (!canRequestVisit(property)) {
+      setAppointmentTone("error");
+      setAppointmentStatus("This listing is unavailable or its details have not loaded, so a visit cannot be requested.");
+      return;
+    }
     setSelectedPropertyId(propertyId);
+    setAppointmentStatus("");
     bookingDialog.current?.showModal();
   }
 
   return (
-    <main className="orbit-platform" aria-label="Awaaz Estate Neural Orbit Platform">
+    <main className={`orbit-platform ${showDrawer ? "has-conversation" : ""}`} aria-label="Awaaz Estate Voice Assistant">
       {/* Top HUD Bar */}
       <header className="orbit-header">
         <div className="orbit-brand">
@@ -851,7 +1178,7 @@ function App() {
           </div>
           <div className="orbit-title-group">
             <span className="orbit-brand-title">Awaaz Estate</span>
-            <span className="orbit-version-badge">NEURAL ORBIT v1.0</span>
+            <span className="orbit-version-badge">VOICE ASSISTANT</span>
           </div>
         </div>
 
@@ -865,87 +1192,60 @@ function App() {
           <button
             type="button"
             className="orbit-icon-btn"
+            onClick={() => setShowAnalytics(true)}
+            title="Live service analytics"
+            aria-label="Open live service analytics"
+          >
+            <Icon>{paths.chart}</Icon>
+          </button>
+          <button
+            type="button"
+            className="orbit-icon-btn"
             onClick={() => setShowSettingsModal(true)}
             title="Audio & Language Settings"
+            aria-label="Audio and language settings"
           >
             <Icon>{paths.settings}</Icon>
           </button>
 
-          <div className={`orbit-status-chip ${connected ? "live" : voiceReady ? "ready" : "offline"}`}>
+          <div
+            className={`orbit-status-chip ${connectionStatus.tone}`}
+            title={runtimeReadiness?.voiceVerification === "configuration_only" && voiceReady
+              ? `${connectionStatus.label}. ${voiceMode} credentials and SDK are configured; provider connectivity and audio are checked during a live call.`
+              : `${connectionStatus.label}. Selected ${voiceMode} voice route ${voiceReady ? "is configured" : "is not configured"}.`}
+            aria-label={runtimeReadiness?.voiceVerification === "configuration_only" && voiceReady
+              ? `${connectionStatus.label}. Provider connectivity and audio are checked during a live call.`
+              : `${connectionStatus.label}. Selected ${voiceMode} voice route ${voiceReady ? "configured" : "not configured"}.`}
+            role="status"
+            aria-live="polite"
+          >
             <span className="status-dot" />
-            <span>{connected ? "LIVE OPENAI VOICE" : voiceReady ? "LIVE READY" : "VOICE OFFLINE"}</span>
+            <span>{connectionStatus.label}</span>
           </div>
+          <button
+            type="button"
+            className={`orbit-inventory-chip ${inventoryStatus.tone}`}
+            onClick={() => setShowLocations(true)}
+            title={`${inventoryStatus.detail}. Open property inventory.`}
+            aria-label={`${inventoryStatus.label}. ${inventoryStatus.detail}. Open property inventory.`}
+          >
+            <Icon>{paths.home}</Icon>
+            <span className="orbit-inventory-label" aria-live="polite">{inventoryStatus.label}</span>
+            <span className="orbit-inventory-compact" aria-hidden="true">{compactInventoryLabel}</span>
+          </button>
         </div>
       </header>
 
-      {/* Main Orbit Stage — Centered & Immersive */}
-      <div className="orbit-center-stage" ref={stageRef}>
-        <OrbitalLaserBeams activeNodeId={activeNodeId} stageRef={stageRef} />
-
-        {/* Left Orbital Action Nodes (Surrounding the Orbit) */}
-        <div className="orbital-nodes-col left-nodes" aria-label="Left Orbital Command Nodes">
-          <div
-            data-node-id="daily-briefing"
-            className={`orbital-node-card ${activeNodeId === "daily-briefing" ? "active-performing" : ""}`}
-            onClick={() => void performAction("Give me today's real estate market briefing", "Daily Briefing", "daily-briefing")}
-          >
-            <div className={`node-dot-pin ${activeNodeId === "daily-briefing" ? "pulsing" : ""}`} />
-            <div className="node-content">
-              <span className="node-title">Daily Briefing</span>
-              <span className="node-sub">Market Overview</span>
-            </div>
-            <span className={`node-tag ${activeNodeId === "daily-briefing" ? "green" : ""}`}>
-              {activeNodeId === "daily-briefing" ? "ACTIVE" : "BRIEF"}
-            </span>
-          </div>
-
-          <div
-            data-node-id="karachi-trends"
-            className={`orbital-node-card ${activeNodeId === "karachi-trends" ? "active-performing" : ""}`}
-            onClick={() => void performAction("Show me 2-bedroom flats in Karachi Clifton and DHA", "Karachi Trends", "karachi-trends")}
-          >
-            <div className={`node-dot-pin ${activeNodeId === "karachi-trends" ? "pulsing" : ""}`} />
-            <div className="node-content">
-              <span className="node-title">Karachi Trends</span>
-              <span className="node-sub">Clifton & DHA</span>
-            </div>
-            <span className={`node-tag ${activeNodeId === "karachi-trends" ? "cyan" : ""}`}>
-              {activeNodeId === "karachi-trends" ? "ACTIVE" : "2-BED"}
-            </span>
-          </div>
-
-          <div
-            data-node-id="lahore-hotspots"
-            className={`orbital-node-card ${activeNodeId === "lahore-hotspots" ? "active-performing" : ""}`}
-            onClick={() => void performAction("Show me luxury villas in DHA Lahore", "Lahore Hotspots", "lahore-hotspots")}
-          >
-            <div className={`node-dot-pin ${activeNodeId === "lahore-hotspots" ? "pulsing" : ""}`} />
-            <div className="node-content">
-              <span className="node-title">Lahore Hotspots</span>
-              <span className="node-sub">DHA Villas</span>
-            </div>
-            <span className={`node-tag ${activeNodeId === "lahore-hotspots" ? "purple" : ""}`}>
-              {activeNodeId === "lahore-hotspots" ? "ACTIVE" : "PRIME"}
-            </span>
-          </div>
-
-          <div
-            data-node-id="islamabad-prime"
-            className={`orbital-node-card ${activeNodeId === "islamabad-prime" ? "active-performing" : ""}`}
-            onClick={() => void performAction("Show me commercial offices in Islamabad Blue Area", "Islamabad Commercial", "islamabad-prime")}
-          >
-            <div className={`node-dot-pin ${activeNodeId === "islamabad-prime" ? "pulsing" : ""}`} />
-            <div className="node-content">
-              <span className="node-title">Islamabad Prime</span>
-              <span className="node-sub">Blue Area</span>
-            </div>
-            <span className={`node-tag ${activeNodeId === "islamabad-prime" ? "cyan" : ""}`}>
-              {activeNodeId === "islamabad-prime" ? "ACTIVE" : "COMM"}
-            </span>
-          </div>
+      {appointmentStatus && (
+        <div className={`appointment-status-banner tone-${appointmentTone}`} role="status" aria-live="polite">
+          <span>{appointmentStatus}</span>
+          <button type="button" onClick={() => setAppointmentStatus("")} aria-label="Dismiss appointment status">×</button>
         </div>
+      )}
 
-        {/* Center: The Core 3D Holographic Orbit */}
+      {/* Voice-first stage: the live conversation and server state remain visible and verifiable. */}
+      <div className="orbit-center-stage">
+        {/* Voice workspace: the orb reflects live session state; conversation text remains the source of truth. */}
         <div className="orbit-core-view">
           <div className="orbit-canvas-wrap">
             <NeuralOrb
@@ -958,10 +1258,108 @@ function App() {
 
           {/* Subtitles & State Indicator directly around Orbit */}
           <div className="orbit-state-overlay">
-            <div className={`orbit-state-pill phase-${displayVoicePhase}`}>
+            <div
+              className={`orbit-state-pill phase-${displayVoicePhase}`}
+              role={displayVoicePhase === "error" ? undefined : "status"}
+              aria-live={displayVoicePhase === "error" ? "off" : "polite"}
+              aria-atomic="true"
+            >
               {displayVoicePhase === "error" ? activeActionLabel : voicePhaseLabels[displayVoicePhase]}
             </div>
-            {subtitles && <p className="orbit-subtitles-stream">"{subtitles}"</p>}
+            {!connected && voiceReady && runtimeReadiness?.voiceVerification === "configuration_only" && (
+              <p className="voice-verification-note" role="status">
+                Provider access is checked when the live voice session starts.
+              </p>
+            )}
+            {(runtimeReadiness?.reasoningStatus === "cooldown" || runtimeReadiness?.reasoningStatus === "provider_error") && (
+              <div className="voice-reasoning-warning" role="status">
+                <strong>{runtimeReadiness.reasoningFailureCategory === "rate_limited"
+                  ? "OpenAI is rate limiting model requests."
+                  : runtimeReadiness.reasoningFailureCategory === "authentication_failed"
+                    ? "OpenAI rejected the model credentials."
+                    : runtimeReadiness.reasoningFailureCategory === "timeout"
+                      ? "OpenAI model requests are timing out."
+                      : "OpenAI model reasoning is unavailable."}</strong>
+                <span> Voice is using deterministic fallback responses. Check the provider status and account limits.</span>
+              </div>
+            )}
+            {(!voiceReady && runtimeReadiness !== null) || readinessCheckFailed ? (
+              <section className="voice-readiness-notice" aria-labelledby="voice-readiness-title">
+                <div>
+                  <strong id="voice-readiness-title">Voice is unavailable right now</strong>
+                  <p>Text chat is still available. Check the setup details or voice settings to resolve this route.</p>
+                  {runtimeReadiness && (runtimeReadiness.blockers.length > 0 || Object.values(runtimeReadiness.options).some(Boolean)) && (
+                    <details>
+                      <summary>{runtimeReadiness.blockers.length > 0 ? "Setup details" : "Available voice routes"}</summary>
+                      <ul>
+                        {runtimeReadiness.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
+                        {Object.entries(runtimeReadiness.options).filter(([, available]) => available).map(([route]) => (
+                          <li key={route}>{route === "hybrid" ? "UrduLish hybrid" : route === "openai" ? "OpenAI Realtime" : "Standard"} route is configured. Provider connectivity and audio are checked during a live call. Change the conversation language in settings to select its route.</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {readinessCheckFailed && <p>The backend readiness check did not respond. Confirm the API is running.</p>}
+                </div>
+                <div className="voice-readiness-actions">
+                  <button type="button" onClick={() => {
+                    setReadinessCheckFailed(false);
+                    setReadinessRefreshKey((current) => current + 1);
+                  }}>Check again</button>
+                  <button type="button" onClick={() => setShowSettingsModal(true)}>Voice settings</button>
+                  <button type="button" onClick={() => textInputRef.current?.focus()}>Use text chat</button>
+                </div>
+              </section>
+            ) : null}
+            {(connecting || connected || voiceFailureStage !== null) && (
+              <details
+                className="voice-diagnostics"
+                aria-label="Voice troubleshooting details"
+              >
+                <summary className="voice-diagnostics-summary">
+                  <span>Voice troubleshooting</span>
+                  <span className="voice-diagnostics-summary-state">
+                    {voiceFailureStage
+                      ? `Issue: ${voiceStages.find((stage) => stage.id === voiceFailureStage)?.label ?? voiceFailureStage}`
+                      : connected ? "Connection active" : "View connection steps"}
+                  </span>
+                </summary>
+                <ol className="voice-diagnostics-steps">
+                  {voiceStages.map((stage, index) => (
+                    <li
+                      key={stage.id}
+                      className={`voice-diagnostic-step state-${stage.state}`}
+                      aria-current={stage.state === "active" ? "step" : undefined}
+                    >
+                      <span className="voice-diagnostic-index">{stage.state === "done" ? "✓" : index + 1}</span>
+                      <span className="voice-diagnostic-copy">
+                        <strong>{stage.label}</strong>
+                        <small>{stage.detail}</small>
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+                {voiceFailureStage && shouldOfferVoiceRetry(audioUnavailableReason) && (
+                  <button type="button" className="voice-diagnostic-retry" onClick={retryVoiceFailure}>
+                    {voiceFailureStage === "microphone" ? "Retry microphone"
+                      : voiceFailureStage === "playback" && canReplayResponse ? "Replay spoken reply"
+                        : "Retry voice connection"}
+                  </button>
+                )}
+              </details>
+            )}
+            {connected && (liveTranscript || displayVoicePhase === "listening") && (
+              <div className="voice-live-transcript" aria-live="polite" aria-atomic="true">
+                <span className="voice-live-transcript-label">
+                  <span className="voice-live-transcript-dot" />
+                  {liveTranscript ? "LIVE TRANSCRIPT" : "YOUR TURN"}
+                </span>
+                <p>{liveTranscript || "Speak naturally. I’m listening."}</p>
+              </div>
+            )}
+            {subtitles && !showDrawer && (
+              <p className="orbit-subtitles-stream">"{subtitles}"</p>
+            )}
             {displayVoicePhase === "speaking" && (
               <button
                 type="button"
@@ -972,11 +1370,11 @@ function App() {
                     socket.send(JSON.stringify({ type: "barge_in" }));
                   } else {
                     setVoicePhase(voiceReady ? "idle" : "blocked");
-                    setActiveActionLabel("SPEECH STOPPED");
+                    setActiveActionLabel("Speech stopped");
                   }
                   if (socket?.readyState === WebSocket.OPEN) {
                     setVoicePhase("listening");
-                    setActiveActionLabel("BARGE-IN TRIGGERED — LISTENING");
+                    setActiveActionLabel("Listening to you");
                   }
                 }}
                 aria-label="Tap to interrupt agent speech"
@@ -989,146 +1387,36 @@ function App() {
 
           {/* Audio Waveform Spectrum */}
           <WaveformVisualizer
-            isActive={connected && (displayVoicePhase === "speaking" || displayVoicePhase === "listening")}
+            mode={connected && displayVoicePhase === "listening"
+              ? "listening"
+              : connected && displayVoicePhase === "speaking" ? "speaking" : "idle"}
+            analyser={audioAnalyser}
           />
         </div>
 
-        {/* Right Orbital Action Nodes (Surrounding the Orbit) */}
-        <div className="orbital-nodes-col right-nodes" aria-label="Right Orbital Telemetry Nodes">
-          <div
-            data-node-id="installment-plans"
-            className={`orbital-node-card ${activeNodeId === "installment-plans" ? "active-performing" : ""}`}
-            onClick={() => void performAction("Explain installment and payment plans for Clifton apartments", "Payment Plans", "installment-plans")}
-          >
-            <span className={`node-tag ${activeNodeId === "installment-plans" ? "green" : "purple"}`}>
-              {activeNodeId === "installment-plans" ? "ACTIVE" : "PLAN"}
-            </span>
-            <div className="node-content text-right">
-              <span className="node-title">Installment Plans</span>
-              <span className="node-sub">Flexible Payment</span>
-            </div>
-            <div className={`node-dot-pin ${activeNodeId === "installment-plans" ? "pulsing" : ""}`} />
-          </div>
-
-          <div
-            data-node-id="rental-yield"
-            className={`orbital-node-card ${activeNodeId === "rental-yield" ? "active-performing" : ""}`}
-            onClick={() => void performAction("Compare rental yields between Karachi and Lahore DHA", "Rental Yield", "rental-yield")}
-          >
-            <span className={`node-tag ${activeNodeId === "rental-yield" ? "cyan" : "green"}`}>
-              {activeNodeId === "rental-yield" ? "ACTIVE" : "ROI"}
-            </span>
-            <div className="node-content text-right">
-              <span className="node-title">Rental Yield</span>
-              <span className="node-sub">ROI Analyzer</span>
-            </div>
-            <div className={`node-dot-pin ${activeNodeId === "rental-yield" ? "pulsing" : ""}`} />
-          </div>
-
-          <div
-            data-node-id="schedule-visit"
-            className={`orbital-node-card ${activeNodeId === "schedule-visit" ? "active-performing" : ""}`}
-            onClick={() => {
-              setActiveNodeId("schedule-visit");
-              playFuturisticTone("action");
-              bookingDialog.current?.showModal();
-            }}
-          >
-            <span className={`node-tag ${activeNodeId === "schedule-visit" ? "purple" : "cyan"}`}>
-              {activeNodeId === "schedule-visit" ? "OPEN" : "BOOK"}
-            </span>
-            <div className="node-content text-right">
-              <span className="node-title">Schedule Visit</span>
-              <span className="node-sub">Site Tour</span>
-            </div>
-            <div className={`node-dot-pin ${activeNodeId === "schedule-visit" ? "pulsing" : ""}`} />
-          </div>
-
-          <div
-            data-node-id="live-telemetry"
-            className={`orbital-node-card telemetry-node ${activeNodeId === "live-telemetry" ? "active-performing" : ""}`}
-            onClick={() => {
-              setActiveNodeId("live-telemetry");
-              playFuturisticTone("action");
-              setShowMapRadar(true);
-            }}
-          >
-            <span className="node-tag">{lastLatencyMs === null ? "—" : `${lastLatencyMs}ms`}</span>
-            <div className="node-content text-right">
-              <span className="node-title">Geospatial Radar</span>
-              <span className="node-sub">Interactive Map HUD</span>
-            </div>
-            <div className="node-dot-pin green-pin" />
-          </div>
-        </div>
       </div>
 
       {/* Floating Bottom Dock (Directly beneath the Orbit) */}
       <div className="orbit-bottom-dock">
-        <div className="orbit-dock-pill-bar">
-          <button
-            type="button"
-            className={`dock-action-pill ${showDrawer ? "active" : ""}`}
-            onClick={() => setShowDrawer(!showDrawer)}
-            aria-label="Toggle Dialogue & Property Results"
-          >
-            <Icon>{paths.transcript}</Icon>
-            <span>{showDrawer ? "Hide Results" : "Show Results"}</span>
-            {matches.length > 0 && <span className="dock-count-badge">{matches.length}</span>}
-          </button>
-
-          <button
-            type="button"
-            className={`dock-action-pill ${showCompareHUD ? "active" : ""}`}
-            onClick={() => {
-              if (comparedPropertyIds.length === 0 && matches.length >= 2) {
-                setComparedPropertyIds(matches.slice(0, 3));
-              }
-              setShowCompareHUD(true);
-            }}
-            aria-label="Side-by-side Property Comparison HUD"
-          >
-            <Icon>{paths.building}</Icon>
-            <span>Compare</span>
-            {comparedPropertyIds.length > 0 ? (
-              <span className="dock-count-badge">{comparedPropertyIds.length}</span>
-            ) : matches.length >= 2 ? (
-              <span className="dock-count-badge">{Math.min(matches.length, 3)}</span>
-            ) : null}
-          </button>
-
-          <button
-            type="button"
-            className={`dock-action-pill ${showMapRadar ? "active" : ""}`}
-            onClick={() => setShowMapRadar(true)}
-            aria-label="Open Geospatial Map Radar"
-          >
-            <Icon>{paths.home}</Icon>
-            <span>Map Radar</span>
-          </button>
-
-          <button
-            type="button"
-            className={`dock-action-pill ${showMortgageCalc ? "active" : ""}`}
-            onClick={() => setShowMortgageCalc(true)}
-            aria-label="Open Mortgage and Installment Calculator"
-          >
-            <Icon>{paths.spark}</Icon>
-            <span>Finance HUD</span>
-          </button>
-
-          <div className={`dock-asr-pill ${connected ? "live" : ""}`}>
-            <span className="asr-led" />
-            <span>ASR {connected ? (voiceMode === "openai" ? "OPENAI LIVE" : "DEEPGRAM LIVE") : "STANDBY"}</span>
+        {voiceFailureStage && (
+          <div className="voice-error-notice" role="alert" aria-live="assertive">
+            <span>{activeActionLabel}</span>
+            {shouldOfferVoiceRetry(audioUnavailableReason) && (
+              <button
+                type="button"
+                onClick={retryVoiceFailure}
+                aria-label={voiceFailureStage === "microphone" ? "Retry microphone"
+                  : voiceFailureStage === "playback" && canReplayResponse ? "Replay spoken reply"
+                    : "Retry voice connection"}
+              >
+                {voiceFailureStage === "microphone" ? "Retry microphone"
+                  : voiceFailureStage === "playback" && canReplayResponse ? "Replay reply"
+                    : "Retry voice"}
+              </button>
+            )}
           </div>
-
-          {connected && audioAvailable && displayVoicePhase === "listening" && (
-            <button type="button" className="dock-action-pill" onClick={() => finishSpeech.current?.()} aria-label="Finish speaking and get reply">
-              <Icon>{paths.send}</Icon>
-              <span>Reply now</span>
-            </button>
-          )}
-
+        )}
+        <div className="orbit-dock-pill-bar">
           <button
             type="button"
             className={`dock-call-pill ${connected ? "in-call" : ""}`}
@@ -1139,24 +1427,102 @@ function App() {
             <Icon>{connected ? paths.phone : paths.mic}</Icon>
             <span>{connecting ? "Connecting…" : connected ? "Stop Voice Chat" : "Start Voice Chat"}</span>
           </button>
+
+          {canReplayResponse && (
+            <button
+              type="button"
+              className="dock-action-pill"
+              onClick={() => void replayLastResponse()}
+              aria-label="Replay last voice response"
+            >
+              <Icon>{paths.volume}</Icon>
+              <span>Replay reply</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            className={`dock-action-pill ${showDrawer ? "active" : ""}`}
+            onClick={() => setShowDrawer(!showDrawer)}
+            aria-label="Toggle conversation and property recommendations"
+          >
+            <Icon>{paths.transcript}</Icon>
+            <span>{showDrawer ? "Hide Conversation" : "Conversation"}</span>
+            {matches.length > 0 && <span className="dock-count-badge">{matches.length}</span>}
+          </button>
+
+          {matches.length >= 2 && (
+            <button
+              type="button"
+              className={`dock-action-pill ${showCompareHUD ? "active" : ""}`}
+              onClick={() => {
+                if (comparedPropertyIds.length === 0) {
+                  setComparedPropertyIds(matches.slice(0, 3));
+                }
+                setShowCompareHUD(true);
+              }}
+              aria-label="Compare selected property listings"
+            >
+              <Icon>{paths.building}</Icon>
+              <span>Compare</span>
+              {comparedPropertyIds.length > 0 && (
+                <span className="dock-count-badge">{comparedPropertyIds.length}</span>
+              )}
+            </button>
+          )}
+
+          <button
+            type="button"
+            className={`dock-action-pill ${showLocations ? "active" : ""}`}
+            onClick={() => setShowLocations(true)}
+            aria-label="Browse available property locations"
+          >
+            <Icon>{paths.home}</Icon>
+            <span>Locations</span>
+          </button>
+
+          <button
+            type="button"
+            className={`dock-action-pill ${showMortgageCalc ? "active" : ""}`}
+            onClick={() => setShowMortgageCalc(true)}
+            aria-label="Open Mortgage and Installment Calculator"
+          >
+            <Icon>{paths.spark}</Icon>
+            <span>Finance</span>
+          </button>
+
+          <div className={`dock-asr-pill ${audioAvailable ? "live" : ""}`}>
+            <span className="asr-led" />
+            <span>Microphone · {audioAvailable
+              ? microphoneSignal === "detected" ? "active" : "ready"
+              : connected ? "starting" : "off"}</span>
+          </div>
+
+          {connected && audioAvailable && displayVoicePhase === "listening" && (
+            <button type="button" className="dock-action-pill" onClick={() => finishSpeech.current?.()} aria-label="Finish speaking and get reply">
+              <Icon>{paths.send}</Icon>
+              <span>Reply now</span>
+            </button>
+          )}
+
         </div>
 
-        {/* Quick Voice Query Chips */}
-        <div className="orbit-quick-chips-row">
+        {/* Shortcuts submit real questions to the live assistant; they do not use demo inventory. */}
+        <div className="orbit-quick-chips-row" role="group" aria-label="Start with a real estate topic">
           {[
-            { icon: "✨", label: "Clifton 2-Bed Luxury", query: "Show me 2-bedroom luxury apartments in Clifton Karachi", nodeId: "karachi-trends" },
-            { icon: "🏡", label: "5 Marla DHA Lahore", query: "Show me 5 Marla and 10 Marla houses in DHA Lahore", nodeId: "lahore-hotspots" },
-            { icon: "🏢", label: "Blue Area Islamabad", query: "Show me commercial offices in Blue Area Islamabad", nodeId: "islamabad-prime" },
-            { icon: "📑", label: "FBR Tax Calculation", query: "Calculate FBR tax and transfer duty for 3 crore purchase", nodeId: "daily-briefing" },
-            { icon: "💰", label: "Installment Plans", query: "Explain installment and payment plans for Clifton apartments", nodeId: "installment-plans" },
+            { icon: paths.home, label: "Buy a home", query: "I want to buy a home. Ask for my city, area, and budget, then search available listings." },
+            { icon: paths.home, label: "Find a rental", query: "I want to rent a property. Ask for my city, area, and budget, then search available listings." },
+            { icon: paths.building, label: "Commercial space", query: "I need a commercial property. Ask for my property type, city, area, and budget." },
+            { icon: paths.chart, label: "Investment inquiry", query: "I am considering a property investment. Ask about my goals and explain only what current verified company information supports." },
+            { icon: paths.calendar, label: "Payment plans", query: "Tell me about payment plans only when they are included in a verified available listing." },
           ].map((chip) => (
             <button
               key={chip.label}
               type="button"
               className="quick-chip-btn"
-              onClick={() => void performAction(chip.query, chip.label, chip.nodeId)}
+              onClick={() => void performAction(chip.query, chip.label)}
             >
-              <span className="quick-chip-icon">{chip.icon}</span>
+              <span className="quick-chip-icon"><Icon>{chip.icon}</Icon></span>
               <span>{chip.label}</span>
             </button>
           ))}
@@ -1171,12 +1537,13 @@ function App() {
           }}
         >
           <input
+            ref={textInputRef}
             type="text"
             className="orbit-cmd-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Type a command, or Start Talk..."
-            aria-label="Command Input"
+            placeholder="Ask about budget, location, property, or booking…"
+            aria-label="Type a message to the real estate assistant"
           />
           <button type="submit" className="orbit-cmd-submit" aria-label="Send Command">
             <Icon>{paths.send}</Icon>
@@ -1184,15 +1551,26 @@ function App() {
         </form>
       </div>
 
-      {/* Expandable Results & Property Drawer */}
+      {/* Persistent conversation and recommendations panel */}
       {showDrawer && (
-        <div className="orbit-floating-drawer" role="dialog" aria-label="Results and Property Cards">
+        <aside className="orbit-floating-drawer" aria-label="Conversation and property recommendations">
           <div className="drawer-bar-top">
             <div className="drawer-title-wrap">
               <Icon>{paths.spark}</Icon>
-              <span>Action Results & Verified Recommendations ({matches.length})</span>
+              <span>Conversation & listings ({matches.length})</span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              {messages.length > 0 && (
+                <button
+                  type="button"
+                  className="drawer-copy-btn"
+                  onClick={() => void copyConversation()}
+                  aria-label="Copy conversation transcript"
+                  title="Copy conversation"
+                >
+                  <Icon>{paths.copy}</Icon>
+                </button>
+              )}
               {matches.length >= 2 && (
                 <button
                   type="button"
@@ -1205,50 +1583,122 @@ function App() {
                   }}
                   aria-label="Compare properties side-by-side"
                 >
-                  ⚖️ Compare ({comparedPropertyIds.length || Math.min(matches.length, 3)}) Side-by-Side
+                  <Icon>{paths.compare}</Icon>
+                  Compare ({comparedPropertyIds.length || Math.min(matches.length, 3)}) Side-by-Side
                 </button>
               )}
               <button
                 type="button"
                 className="drawer-close-btn"
                 onClick={() => setShowDrawer(false)}
-                aria-label="Close Drawer"
+                aria-label="Close conversation panel"
               >
                 <Icon>{paths.close}</Icon>
               </button>
             </div>
           </div>
 
+          <span className="drawer-copy-status" role="status" aria-live="polite">
+            {conversationCopyStatus}
+          </span>
+
+          {(lastTiming || agentDecisionLatencyMs !== null || substantiveAnswerLatencyMs !== null) && (
+            <details className="conversation-diagnostics">
+              <summary>Voice timing details</summary>
+              <dl>
+                {lastTiming && (
+                  <div>
+                    <dt>{lastTiming.label}</dt>
+                    <dd>{lastTiming.milliseconds.toLocaleString()} ms</dd>
+                  </div>
+                )}
+                {agentDecisionLatencyMs !== null && (
+                  <div>
+                    <dt>Agent decision</dt>
+                    <dd>{agentDecisionLatencyMs.toLocaleString()} ms</dd>
+                  </div>
+                )}
+                {substantiveAnswerLatencyMs !== null && (
+                  <div>
+                    <dt>First answer audio</dt>
+                    <dd>{substantiveAnswerLatencyMs.toLocaleString()} ms</dd>
+                  </div>
+                )}
+              </dl>
+              <p>Timings are local diagnostics; they do not measure human-perceived audio quality.</p>
+            </details>
+          )}
+
           <div className="drawer-scroll-body">
             {/* Messages */}
-            <div className="drawer-messages-list">
-              {messages.map((m, idx) => (
-                <div key={idx} className={`drawer-bubble role-${m.role}`}>
-                  <span className="bubble-author">{m.role === "agent" ? "Awaaz Neural" : "You"}</span>
+            <div className="drawer-messages-list" role="log" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions">
+              {messages.length === 0 ? (
+                <div className="conversation-start-state" role="status">
+                  <span className="conversation-start-eyebrow">LIVE CONVERSATION</span>
+                  <p>No messages yet</p>
+                  <small>Start a voice conversation or type a question. Replies will appear here after the live assistant responds.</small>
+                </div>
+              ) : messages.map((m, idx) => (
+                <div key={`${m.time}-${idx}`} className={`drawer-bubble role-${m.role}`}>
+                  <span className="bubble-meta">
+                    <strong className="bubble-author">{m.role === "agent" ? "Awaaz Estate" : "You"}</strong>
+                    <time className="bubble-time">{m.time}</time>
+                  </span>
                   <div className="bubble-text">{m.text}</div>
                 </div>
               ))}
             </div>
+
+            {matches.length === 0 && (
+              <div className="conversation-empty-state" role="status">
+                {inventoryLoadState === "loading" ? (
+                  <p>Loading the company’s current property inventory…</p>
+                ) : inventoryLoadState === "error" ? (
+                  <>
+                    <p>Could not load live property inventory. Recommendations and visit requests are unavailable until it reconnects.</p>
+                    <button type="button" onClick={() => {
+                      setInventoryLoadState("loading");
+                      setInventoryRefreshKey((current) => current + 1);
+                    }}>Retry inventory</button>
+                  </>
+                ) : inventoryProperties.length === 0 ? (
+                  <>
+                    <p>No real company listings are loaded. The assistant will not invent properties; recommendations and visits need live inventory.</p>
+                    <button type="button" onClick={() => setShowLocations(true)}>Check inventory</button>
+                  </>
+                ) : (
+                  <p>No personalized recommendations yet. Ask the assistant to search the loaded listings.</p>
+                )}
+              </div>
+            )}
 
             {/* Properties Cards Grid */}
             {matches.length > 0 && (
               <div className="drawer-properties-grid">
                 {matches.map((id) => {
                   const prop = propertyDetails[id];
+                  const detailsLoading = loadingPropertyIds.includes(id);
                   const isCompared = comparedPropertyIds.includes(id);
                   return (
                     <div key={id} className="drawer-property-item">
                       <div className="item-head">
                         <span className="prop-id">{id}</span>
-                        <span className="prop-purpose">{prop?.purpose ?? "VERIFIED"}</span>
+                        <span className="prop-purpose">{prop?.purpose.toUpperCase() ?? (detailsLoading ? "LOADING" : "DETAILS UNAVAILABLE")}</span>
                       </div>
-                      <h4 className="prop-title">{prop?.title ?? `Verified Property ${id}`}</h4>
-                      <div className="prop-geo">{prop ? `${prop.area}, ${prop.city}` : "Pakistan"}</div>
-                      <div className="prop-price">{prop ? formatPricePKR(prop.price_pkr) : "Price on Inquiry"}</div>
+                      <h4 className="prop-title">{prop?.title ?? (detailsLoading ? "Loading inventory details…" : `Property ${id}`)}</h4>
+                      <div className="prop-geo">{prop ? `${prop.area}, ${prop.city}` : "Inventory details unavailable"}</div>
+                      <div className="prop-price">{prop ? formatPricePKR(prop.price_pkr) : "—"}</div>
                       {prop && (
                         <div className="prop-badges">
                           <span className="unit-badge">{getMarlaEquivalent(prop.size_sqft)}</span>
-                          <span className="noc-badge">NOC VERIFIED</span>
+                          <span className={`availability-badge ${prop.available ? "available" : "unavailable"}`}>
+                            {availabilityLabel(prop.available)}
+                          </span>
+                        </div>
+                      )}
+                      {prop && (
+                        <div className="prop-source">
+                          {inventorySourceLabel(prop.source, prop.source_version)}
                         </div>
                       )}
                       {prop && (
@@ -1276,8 +1726,9 @@ function App() {
                           type="button"
                           className="prop-book-action"
                           onClick={() => openBookingFor(id)}
+                          disabled={!canRequestVisit(prop)}
                         >
-                          Book Visit
+                          {canRequestVisit(prop) ? "Request a visit" : "Unavailable"}
                         </button>
                       </div>
                     </div>
@@ -1287,21 +1738,38 @@ function App() {
             )}
             <div ref={chatBottomRef} />
           </div>
-        </div>
+        </aside>
       )}
 
       {/* Settings Modal Dialog */}
       {showSettingsModal && (
-        <div className="orbit-modal-backdrop" onClick={() => setShowSettingsModal(false)}>
-          <div className="orbit-modal-window" onClick={(e) => e.stopPropagation()}>
+        <dialog
+          ref={settingsDialog}
+          className="orbit-native-modal"
+          aria-labelledby="voice-settings-title"
+          onCancel={(event) => {
+            event.preventDefault();
+            setShowSettingsModal(false);
+          }}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setShowSettingsModal(false);
+          }}
+        >
+          <div className="orbit-modal-window">
             <div className="modal-top">
-              <h3>Neural Audio & Engine Settings</h3>
-              <button type="button" className="modal-x-btn" onClick={() => setShowSettingsModal(false)}>✕</button>
+            <h3 id="voice-settings-title">Voice & Language Settings</h3>
+              <button type="button" className="modal-x-btn" onClick={() => setShowSettingsModal(false)} aria-label="Close voice settings">✕</button>
             </div>
             <div className="modal-fields">
               <div className="form-row">
-                <label>Voice Provider Engine</label>
-                <div className="settings-value">OpenAI Realtime Voice Pipeline</div>
+                <label>Voice session route</label>
+                <div className="settings-value">
+                  {voiceMode === "hybrid"
+                    ? language === "en"
+                      ? "Deepgram English transcription with the speech provider configured by the server"
+                      : "Deepgram Urdu transcription with the speech provider configured by the server"
+                    : "OpenAI multilingual transcription with the speech provider configured by the server"}
+                </div>
               </div>
 
               <div className="form-row">
@@ -1337,22 +1805,25 @@ function App() {
 
               <div className="form-row">
                 <label>Voice Output</label>
-                <div className="settings-value">Generated by the configured OpenAI speech service</div>
+                <div className="settings-value">Generated by the live speech route configured on the backend. Provider outages are reported in the conversation.</div>
               </div>
             </div>
+            <p className="settings-change-hint">Language and microphone changes apply immediately. Changing language may reconnect the voice route.</p>
             <div className="modal-foot">
-              <button type="button" className="save-btn" onClick={() => setShowSettingsModal(false)}>Save & Close</button>
+              <button type="button" className="save-btn" onClick={() => setShowSettingsModal(false)}>Done</button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
+
+      <AnalyticsPanel apiUrl={apiUrl} open={showAnalytics} onClose={() => setShowAnalytics(false)} />
 
       {/* Site Visit Booking Modal Dialog */}
       <dialog className="orbit-booking-dialog" ref={bookingDialog} aria-labelledby="booking-title">
         <div className="dialog-top-bar">
           <div className="dialog-title-wrap">
             <Icon>{paths.calendar}</Icon>
-            <h2 id="booking-title">Schedule In-Person Site Visit</h2>
+          <h2 id="booking-title">Request a site visit</h2>
           </div>
           <button type="button" className="dialog-x" onClick={() => bookingDialog.current?.close()} aria-label="Close dialog">
             <Icon>{paths.close}</Icon>
@@ -1360,7 +1831,7 @@ function App() {
         </div>
 
         <section className="dialog-body">
-          <p className="dialog-info">Confirm your details to book a site visit with our verified consultant.</p>
+          <p className="dialog-info">Submit a visit request for an available listing. Calendar confirmation is shown separately after the request is accepted.</p>
           <div className="dialog-grid">
             <div className="field-block">
               <label>Selected Property</label>
@@ -1370,26 +1841,27 @@ function App() {
                 onChange={(e) => setSelectedPropertyId(e.target.value)}
                 className="dialog-select-input"
               >
-                {matches.length > 0 ? (
-                  matches.map((id) => (
+                {availableMatches.length > 0 ? (
+                  availableMatches.map((id) => (
                     <option key={id} value={id}>
-                      {id} — {propertyDetails[id]?.title ?? "Property"} ({propertyDetails[id]?.city ?? "Pakistan"})
+                      {id} — {propertyDetails[id]?.title ?? "Property"} ({propertyDetails[id]?.city ?? ""})
                     </option>
                   ))
                 ) : (
-                  <option value="" disabled>Import real property listings to schedule a visit</option>
+                  <option value="" disabled>No loaded available listings</option>
                 )}
               </select>
             </div>
 
             <div className="field-block">
-              <label>Requested Visit Date & Time</label>
+              <label>Requested visit time (Pakistan time)</label>
               <input
-                aria-label="Requested visit date and time"
+                aria-label="Requested visit date and time in Pakistan time"
                 type="datetime-local"
                 value={appointmentForm.starts_at}
                 onChange={(e) => setAppointmentForm({ ...appointmentForm, starts_at: e.target.value })}
               />
+              <span className="visit-slot-hint">Monday–Saturday, 10:00–17:30 PKT; start times are every 30 minutes.</span>
             </div>
 
             <div className="field-block">
@@ -1423,15 +1895,23 @@ function App() {
                 onChange={(e) => setAppointmentForm({ ...appointmentForm, contact_phone: e.target.value })}
               />
             </div>
+            <label className="appointment-consent-field">
+              <input
+                type="checkbox"
+                checked={appointmentForm.consent}
+                onChange={(event) => setAppointmentForm({ ...appointmentForm, consent: event.target.checked })}
+              />
+              <span>I consent to use these contact details to coordinate this visit request.</span>
+            </label>
           </div>
 
           <button
             type="button"
             className="dialog-confirm-action"
             onClick={() => void bookVisit()}
-            disabled={!appointmentForm.client_name || !appointmentForm.contact_email || appointmentStatus === "Scheduling site visit…"}
+            disabled={!availableMatches.includes(selectedPropertyId) || !appointmentForm.client_name || !appointmentForm.contact_email || !appointmentForm.consent || Boolean(appointmentSlotError) || appointmentStatus === "Scheduling site visit…"}
           >
-            Confirm Site Visit Booking
+            Send visit request
           </button>
           {appointmentStatus && <p className={`appointment-note tone-${appointmentTone}`} role="status">{appointmentStatus}</p>}
         </section>
@@ -1456,17 +1936,29 @@ function App() {
         />
       )}
 
-      {/* Geospatial Property Map Radar Modal */}
-      {showMapRadar && (
-        <PropertyMapRadar
-          properties={Object.values(propertyDetails)}
-          onClose={() => setShowMapRadar(false)}
+      {/* Inventory locations dialog */}
+      {showLocations && (
+        <PropertyLocations
+          properties={inventoryProperties}
+          apiUrl={apiUrl}
+          loadState={inventoryLoadState}
+          onRetry={() => {
+            setInventoryLoadState("loading");
+            setInventoryRefreshKey((current) => current + 1);
+          }}
+          onImportComplete={() => {
+            setInventoryLoadState("loading");
+            setInventoryRefreshKey((current) => current + 1);
+          }}
+          onClose={() => setShowLocations(false)}
           onSelectProperty={(id) => {
             setSelectedPropertyId(id);
+            const property = inventoryProperties.find((item) => item.id === id);
+            if (property) setPropertyDetails((current) => ({ ...current, [id]: property }));
             setShowDrawer(true);
           }}
           onBook={(id) => {
-            setShowMapRadar(false);
+            setShowLocations(false);
             openBookingFor(id);
           }}
         />
@@ -1489,6 +1981,9 @@ function App() {
 }
 
 const rootElement = document.getElementById("root");
-if (rootElement) {
-  createRoot(rootElement).render(<App />);
+const existingRoot = import.meta.hot?.data.root as Root | undefined;
+const root = rootElement ? existingRoot ?? createRoot(rootElement) : undefined;
+if (rootElement && root) {
+  if (import.meta.hot) import.meta.hot.data.root = root;
+  root.render(<App />);
 }

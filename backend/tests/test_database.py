@@ -1,5 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from threading import Barrier, local
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -233,7 +233,7 @@ def test_postgres_concurrent_bookings_cannot_claim_same_employee_slot() -> None:
             return result
 
     service = SqlAppointmentService(RacingProperties())
-    starts_at = datetime(2026, 9, 28, 10, 0, tzinfo=UTC)
+    starts_at = _future_pk_slot()
 
     def attempt(property_id: str, client_name: str):
         request = AppointmentRequest(

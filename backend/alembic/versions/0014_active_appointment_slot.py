@@ -1,6 +1,6 @@
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0014_active_appointment_slot"
 down_revision = "0013_appointment_client_name"

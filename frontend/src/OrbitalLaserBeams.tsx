@@ -6,14 +6,14 @@ type OrbitalLaserBeamsProps = {
 };
 
 const NODE_COLORS: Record<string, { stroke: string; glow: string; rgb: string }> = {
-  "daily-briefing": { stroke: "#34d399", glow: "#10b981", rgb: "52, 211, 153" },
-  "karachi-trends": { stroke: "#22d3ee", glow: "#06b6d4", rgb: "34, 211, 238" },
-  "lahore-hotspots": { stroke: "#c084fc", glow: "#a855f7", rgb: "192, 132, 252" },
-  "islamabad-prime": { stroke: "#38bdf8", glow: "#0284c7", rgb: "56, 189, 248" },
+  "buyer-search": { stroke: "#34d399", glow: "#10b981", rgb: "52, 211, 153" },
+  "karachi-search": { stroke: "#22d3ee", glow: "#06b6d4", rgb: "34, 211, 238" },
+  "lahore-search": { stroke: "#c084fc", glow: "#a855f7", rgb: "192, 132, 252" },
+  "islamabad-commercial": { stroke: "#38bdf8", glow: "#0284c7", rgb: "56, 189, 248" },
   "installment-plans": { stroke: "#4ade80", glow: "#22c55e", rgb: "74, 222, 128" },
-  "rental-yield": { stroke: "#f472b6", glow: "#ec4899", rgb: "244, 114, 182" },
+  "rental-search": { stroke: "#f472b6", glow: "#ec4899", rgb: "244, 114, 182" },
   "schedule-visit": { stroke: "#fb7185", glow: "#e11d48", rgb: "251, 113, 133" },
-  "live-telemetry": { stroke: "#2dd4bf", glow: "#14b8a6", rgb: "45, 212, 191" },
+  "property-locations": { stroke: "#2dd4bf", glow: "#14b8a6", rgb: "45, 212, 191" },
 };
 
 export function OrbitalLaserBeams({ activeNodeId, stageRef }: OrbitalLaserBeamsProps) {

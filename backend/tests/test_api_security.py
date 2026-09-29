@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from time import monotonic, sleep
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -13,7 +14,7 @@ from app.api.app import app, require_admin_api_key, voice_origin_allowed
 from app.core.config import settings
 from app.domain.models import AgentDecision
 from app.integrations.stt.deepgram import STTEvent
-from app.integrations.tts.router import AudioChunk
+from app.integrations.tts.router import AudioChunk, TTSProviderError
 from app.repositories.database import SessionLocal
 from app.repositories.records import OutboxEventRecord
 from app.services.voice_sessions import VoiceSessionService
@@ -27,9 +28,132 @@ def _voice_ticket(origin: str = "http://localhost:5173") -> str:
     return issued[0]
 
 
-def _authenticate_voice_socket(websocket, ticket: str) -> dict[str, object]:
-    websocket.send_json({"type": "authenticate", "ticket": ticket})
+def _authenticate_voice_socket(
+    websocket, ticket: str, language: str = "ur-Latn"
+) -> dict[str, object]:
+    websocket.send_json({"type": "authenticate", "ticket": ticket, "language": language})
     return websocket.receive_json()
+
+
+def _receive_json_timeout(websocket, timeout_seconds: float = 5) -> dict[str, object]:
+    async def receive() -> dict[str, object]:
+        async with asyncio.timeout(timeout_seconds):
+            return await websocket._send_rx.receive()
+
+    message = websocket.portal.call(receive)
+    websocket._raise_on_close(message)
+    import json
+
+    return json.loads(message["text"])
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("OpenAI speech request failed with HTTP 429", "rate_limited"),
+        ("OpenAI speech request failed with HTTP 402", "insufficient_credits"),
+        ("Fish Audio has insufficient API credits", "insufficient_credits"),
+        ("OpenAI Realtime speech generation timed out", "provider_timeout"),
+        ("OpenAI Realtime did not produce first audio before its deadline", "first_audio_deadline"),
+        ("OpenAI Realtime speech did not match the approved text", "speech_integrity_rejected"),
+    ],
+)
+def test_voice_tts_failure_metrics_use_safe_provider_categories(message: str, expected: str) -> None:
+    import app.api.app as api
+
+    assert api._voice_tts_failure_code(TTSProviderError(message)) == expected
+
+
+def test_voice_tts_failure_metrics_classify_wrapped_provider_cause() -> None:
+    import app.api.app as api
+
+    try:
+        raise TimeoutError("provider request timed out")
+    except TimeoutError as cause:
+        error = TTSProviderError("Speech synthesis failed")
+        error.__cause__ = cause
+
+    assert api._voice_tts_failure_code(error) == "provider_timeout"
+
+
+def test_voice_tts_failure_metrics_classify_openai_quota_exhaustion() -> None:
+    import app.api.app as api
+
+    try:
+        raise RuntimeError("received 1013 insufficient_quota.credit_balance_exhausted")
+    except RuntimeError as cause:
+        error = TTSProviderError("OpenAI Realtime speech service is unavailable")
+        error.__cause__ = cause
+
+    assert api._voice_tts_failure_code(error) == "insufficient_credits"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_readiness_uses_configured_tts_when_realtime_tts_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    class Routes:
+        def __init__(self, readiness: dict[str, bool]) -> None:
+            self.route_status = readiness
+
+        async def readiness(self) -> dict[str, bool]:
+            return self.route_status
+
+    class STT:
+        async def is_ready(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        api,
+        "provider_readiness",
+        lambda: SimpleNamespace(openai=True, multilingual_tts=False),
+    )
+    monkeypatch.setattr(api, "stt", STT())
+    async def unexpected_openai_probe() -> bool:
+        raise AssertionError("disabled OpenAI Realtime readiness must not delay hybrid voice")
+
+    monkeypatch.setattr(api, "live_openai_stt_ready", unexpected_openai_probe)
+    monkeypatch.setattr(api, "openai_voice_tts", Routes({"*": True}))
+    monkeypatch.setattr(api, "tts", Routes({"ur-Latn": True, "en": True}))
+    monkeypatch.setattr(settings, "openai_realtime_tts_enabled", False)
+
+    readiness = await api.voice_option_readiness()
+
+    assert readiness["hybrid_voice_ready"] is True
+    assert readiness["live_voice_pipeline_ready"] is True
+
+
+async def _async_true() -> bool:
+    return True
+
+
+@pytest.mark.asyncio
+async def test_openai_voice_readiness_requires_a_live_realtime_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    calls = {"warmup": 0, "close": 0}
+
+    class Probe:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def warmup(self) -> bool:
+            calls["warmup"] += 1
+            return False
+
+        async def aclose(self) -> None:
+            calls["close"] += 1
+
+    monkeypatch.setattr(api, "_openai_stt_readiness_cache", None)
+    monkeypatch.setattr(api, "build_openai_realtime_stt", lambda config: Probe())
+
+    assert await api.live_openai_stt_ready() is False
+    assert await api.live_openai_stt_ready() is False
+    assert calls == {"warmup": 1, "close": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -69,10 +193,127 @@ def test_state_changing_admin_routes_have_dependency() -> None:
         "/v1/admin/outbox",
         "/v1/admin/audit",
         "/v1/admin/call-outcomes",
+        "/v1/admin/follow-ups/{lead_id}/complete",
     }
     for route in app.routes:
         if getattr(route, "path", None) in protected_paths:
             assert route.dependant.dependencies, f"{route.path} is missing an admin dependency"
+
+
+def test_admin_metrics_exposes_due_follow_ups_without_contact_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    due_reminders = [{
+        "lead_id": "lead-123",
+        "intent": "sell",
+        "city": "Karachi",
+        "area": "DHA Phase 6",
+        "budget_pkr": None,
+        "follow_up_at": "2026-09-29T12:00:00+00:00",
+    }]
+    monkeypatch.setattr(api.leads, "list_due_followups", lambda: due_reminders)
+
+    with TestClient(app) as client:
+        response = client.get("/v1/admin/metrics")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["follow_ups_due"] == due_reminders
+    assert "contact_email" not in body["follow_ups_due"][0]
+    assert "client_name" not in body["follow_ups_due"][0]
+
+
+def test_inventory_file_import_reports_row_errors_and_refreshes_real_listing_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import delete
+
+    from app.repositories.database import SessionLocal
+    from app.repositories.records import PropertyImportBatchRecord, PropertyRecord
+
+    import_id = f"UPLOAD-{uuid4()}"
+    csv_body = (
+        b"id,title,city,area,purpose,price_pkr,bedrooms,size_sqft,amenities,developer,"
+        b"payment_plan,available,assigned_employee,source_version\n"
+        + f"{import_id},Reviewed home,Karachi,DHA,sale,25000000,3,1800,parking,Owner,".encode()
+        + b"Installments,true,Ayesha,rev-1\n"
+        + b"UPLOAD-BAD,Invalid row,Karachi,DHA,sale,not-a-price,3,1800,parking,Owner,"
+        + b"Installments,true,Ayesha,rev-1\n"
+    )
+    monkeypatch.setattr(settings, "app_env", "development")
+    batch_id: str | None = None
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/properties/import-file",
+                params={"filename": "owner-inventory.csv", "source": "owner-reviewed-rev-1"},
+                content=csv_body,
+            )
+            assert response.status_code == 202
+            result = response.json()
+            batch_id = result["batch_id"]
+            assert result["accepted"] == 1
+            assert result["rejected"] == 1
+            assert result["validation_errors"][0]["row"] == 3
+            assert result["validation_errors"][0]["field"] == "price_pkr"
+
+            inventory = client.get("/v1/properties").json()
+            imported = next(row for row in inventory if row["id"] == import_id)
+            assert imported["source"] == "owner-reviewed-rev-1"
+            assert imported["available"] is True
+    finally:
+        with SessionLocal.begin() as session:
+            session.execute(delete(PropertyRecord).where(PropertyRecord.id == import_id))
+            if batch_id:
+                session.execute(
+                    delete(PropertyImportBatchRecord).where(PropertyImportBatchRecord.id == batch_id)
+                )
+
+
+def test_knowledge_file_ingestion_preserves_property_and_language_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    class KnowledgeStore:
+        def __init__(self) -> None:
+            self.chunks = []
+
+        def upsert(self, chunks) -> None:
+            self.chunks = chunks
+
+    store = KnowledgeStore()
+    monkeypatch.setattr(settings, "app_env", "development")
+    monkeypatch.setattr(api, "knowledge_store", store)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/knowledge/ingest-file",
+            params={
+                "filename": "DHA-faq.md",
+                "source": "owner-faq-rev-2",
+                "property_id": "DHA-001",
+                "city": "Karachi",
+                "language": "ur-Latn",
+                "source_version": "rev-2",
+            },
+            content="Payment plan details are listed in the approved brochure.",
+        )
+
+    assert response.status_code == 202
+    result = response.json()
+    assert result["accepted"] == 1
+    assert result["source"] == "owner-faq-rev-2"
+    assert result["metadata"] == {
+        "property_id": "DHA-001",
+        "city": "Karachi",
+        "language": "ur-Latn",
+        "version": "rev-2",
+    }
+    assert store.chunks[0].metadata["property_id"] == "DHA-001"
+    assert store.chunks[0].metadata["language"] == "ur-Latn"
 
 
 def test_consent_bound_lead_form_remains_public() -> None:
@@ -81,7 +322,12 @@ def test_consent_bound_lead_form_remains_public() -> None:
     assert not lead_routes[0].dependant.dependencies
 
 
-def test_readyz_separates_api_health_from_live_voice_readiness() -> None:
+def test_readyz_separates_api_health_from_live_voice_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    monkeypatch.setattr(api, "live_openai_stt_ready", lambda: _async_true())
     with TestClient(app) as client:
         response = client.get("/readyz")
 
@@ -89,12 +335,111 @@ def test_readyz_separates_api_health_from_live_voice_readiness() -> None:
     readiness = response.json()
     assert readiness["status"] in {"ready", "degraded"}
     assert "database_ready" in readiness["application"]
-    assert readiness["live_voice"]["status"] in {"configured", "blocked"}
+    assert readiness["live_voice"]["status"] in {"configured_unverified", "blocked"}
+    assert readiness["live_voice"]["verification"] == "configuration_only"
     assert isinstance(readiness["live_voice"]["blockers"], list)
     assert readiness["live_voice"]["configured"] is (
         readiness["providers"]["standard_voice_ready"]
         or readiness["providers"]["openai_voice_ready"]
+        or readiness["providers"]["hybrid_voice_ready"]
     )
+    assert readiness["structured_reasoning"]["status"] in {
+        "unconfigured",
+        "configured_unverified",
+        "cooldown",
+        "provider_error",
+    }
+
+
+def test_readyz_reports_degraded_agent_during_structured_provider_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+    from app.integrations.providers import ProviderReadiness
+
+    async def voice_ready() -> dict[str, object]:
+        return {
+            "standard_voice_ready": False,
+            "openai_voice_ready": False,
+            "hybrid_voice_ready": True,
+            "multilingual_tts": False,
+            "live_voice_pipeline_ready": True,
+        }
+
+    monkeypatch.setattr(
+        api,
+        "provider_readiness",
+        lambda: ProviderReadiness(
+            deepgram=True,
+            openai=True,
+            fish_audio=True,
+            elevenlabs=False,
+            pinecone=True,
+            multilingual_tts=False,
+            calendar=False,
+            gmail=False,
+            telephony=False,
+        ),
+    )
+    monkeypatch.setattr(api, "voice_option_readiness", voice_ready)
+    monkeypatch.setattr(
+        api.agent,
+        "decision_provider",
+        SimpleNamespace(failure_cooldown_remaining=12.3),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    readiness = response.json()
+    assert readiness["status"] == "degraded"
+    assert readiness["mode"] == "live"
+    assert readiness["structured_reasoning"] == {
+        "configured": True,
+        "status": "cooldown",
+        "fallback": "deterministic",
+        "cooldown_remaining_seconds": 12.3,
+        "last_failure_category": None,
+    }
+
+
+def test_readyz_keeps_structured_provider_failure_visible_after_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    async def voice_ready() -> dict[str, object]:
+        return {
+            "standard_voice_ready": False,
+            "openai_voice_ready": False,
+            "hybrid_voice_ready": True,
+            "multilingual_tts": False,
+            "live_voice_pipeline_ready": True,
+        }
+
+    monkeypatch.setattr(
+        api,
+        "voice_option_readiness",
+        voice_ready,
+    )
+    monkeypatch.setattr(
+        api.agent,
+        "decision_provider",
+        SimpleNamespace(failure_cooldown_remaining=0.0, last_failure_category="rate_limited"),
+    )
+
+    with TestClient(app) as client:
+        readiness = client.get("/readyz").json()
+
+    assert readiness["status"] == "degraded"
+    assert readiness["structured_reasoning"] == {
+        "configured": True,
+        "status": "provider_error",
+        "fallback": "deterministic",
+        "cooldown_remaining_seconds": 0.0,
+        "last_failure_category": "rate_limited",
+    }
 
 
 def test_voice_origin_must_match_configured_origin_outside_development() -> None:
@@ -127,6 +472,21 @@ def test_voice_ticket_endpoint_checks_origin_and_limits_issuance(
     import app.api.app as api
     from app.services.voice_sessions import VoiceSessionService
 
+    async def ready_options() -> dict[str, bool]:
+        return {
+            "standard_voice_ready": False,
+            "openai_voice_ready": True,
+            "hybrid_voice_ready": True,
+            "multilingual_tts": False,
+            "live_voice_pipeline_ready": True,
+        }
+
+    async def warmup_voice_transport() -> bool:
+        return False
+
+    monkeypatch.setattr(api, "voice_option_readiness", ready_options)
+    monkeypatch.setattr(api.openai_voice_tts, "warmup", warmup_voice_transport)
+
     monkeypatch.setattr(
         api,
         "voice_sessions",
@@ -141,7 +501,7 @@ def test_voice_ticket_endpoint_checks_origin_and_limits_issuance(
         response = client.post(
             "/v1/voice/session",
             headers={"origin": "http://localhost:5173"},
-            json={"mode": "openai"},
+            json={"mode": "hybrid"},
         )
         assert response.status_code == 200
         ticket = response.json()["ticket"]
@@ -490,9 +850,80 @@ def test_voice_session_records_separate_decision_tts_and_end_to_audio_latency(
     assert any(event.get("type") == "audio_chunk" and event.get("audio_base64") for event in events)
     assert measurements["voice.decision_latency_ms"]
     assert measurements["voice.tts_first_audio_latency_ms"]
-    assert measurements["voice.end_of_turn_to_first_audio_ms"]
+    assert measurements["voice.final_transcript_to_first_audio_ms"]
     assert measurements["voice.tts_stream_duration_ms"]
-    assert measurements["voice.end_of_turn_to_first_audio_ms"][0] >= 0
+    assert measurements["voice.final_transcript_to_first_audio_ms"][0] >= 0
+
+
+def test_realtime_tts_failure_falls_back_to_http_speech_before_first_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    monkeypatch.setattr(settings, "openai_realtime_tts_enabled", True)
+
+    class ReadySTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            del audio
+            if False:
+                yield STTEvent()
+
+    class BrokenRealtimeTTS:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def warmup(self) -> bool:
+            return True
+
+        async def aclose(self) -> None:
+            return None
+
+        async def synthesize_stream(self, text: str, language: str):
+            del text, language
+            raise TTSProviderError("provider did not start")
+            yield AudioChunk(0, b"", "", 24_000)  # pragma: no cover
+
+    class HttpFallbackTTS:
+        async def synthesize_stream(self, text: str, language: str):
+            assert text == "One verified answer."
+            yield AudioChunk(0, b"\x01\x00" * 80, language, 24_000)
+            yield AudioChunk(1, b"", language, 24_000, is_final=True)
+
+    fallback_counts: list[str] = []
+    monkeypatch.setattr(api, "build_openai_realtime_stt", lambda config: ReadySTT())
+    monkeypatch.setattr(api, "OpenAIRealtimeSpeechProvider", BrokenRealtimeTTS)
+    monkeypatch.setattr(api, "openai_voice_tts", HttpFallbackTTS())
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: AgentDecision(kind="answer", spoken_text="One verified answer."),
+    )
+    monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    monkeypatch.setattr(api.traces, "increment", lambda name, amount=1: fallback_counts.append(name))
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "openai")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "user_text", "text": "Hello", "language": "en"})
+        events = []
+        while True:
+            event = websocket.receive_json()
+            events.append(event)
+            if event.get("type") == "audio_chunk" and event.get("is_final"):
+                break
+
+    assert any(event.get("type") == "agent_response" for event in events)
+    assert any(event.get("type") == "audio_chunk" and event.get("audio_base64") for event in events)
+    assert "voice:realtime_tts_fallback" in fallback_counts
 
 
 def test_openai_voice_buffers_audio_while_transcription_connects(
@@ -502,8 +933,16 @@ def test_openai_voice_buffers_audio_while_transcription_connects(
 
     assert settings.voice_audio_queue_frames >= 128
 
-    class DelayedSTT:
+    from app.integrations.stt import OpenAIRealtimeSTT
+
+    class DelayedSTT(OpenAIRealtimeSTT):
+        def __init__(self) -> None:
+            super().__init__("test-key")
+
         async def is_ready(self) -> bool:
+            return True
+
+        async def warmup(self) -> bool:
             return True
 
         async def stream(self, audio):
@@ -515,9 +954,24 @@ def test_openai_voice_buffers_audio_while_transcription_connects(
     class FakeTTS:
         async def synthesize_stream(self, text: str, language: str):
             del text
-            yield AudioChunk(sequence=0, audio=b"", language=language, sample_rate=24_000, is_final=True)
+            yield AudioChunk(sequence=0, audio=b"\x01\x00" * 80, language=language, sample_rate=24_000)
+            yield AudioChunk(sequence=1, audio=b"", language=language, sample_rate=24_000, is_final=True)
 
-    monkeypatch.setattr(api, "openai_voice_stt", DelayedSTT())
+    class NoRealtimeTTS:
+        async def warmup(self) -> bool:
+            return False
+
+        async def aclose(self) -> None:
+            return None
+
+        async def synthesize_stream(self, text: str, language: str):
+            del text, language
+            raise AssertionError("Unavailable Realtime TTS must not synthesize")
+            yield AudioChunk(sequence=0, audio=b"", language="", sample_rate=24_000)
+
+    provider = DelayedSTT()
+    monkeypatch.setattr(api, "build_openai_realtime_stt", lambda config: provider)
+    monkeypatch.setattr(api, "OpenAIRealtimeSpeechProvider", lambda **kwargs: NoRealtimeTTS())
     monkeypatch.setattr(api, "openai_voice_tts", FakeTTS())
     monkeypatch.setattr(
         api.agent,
@@ -535,15 +989,691 @@ def test_openai_voice_buffers_audio_while_transcription_connects(
         ) as websocket,
     ):
         _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "set_language", "language": "ur-Latn"})
+        assert websocket.receive_json()["response_language"] == "ur-Latn"
+        assert provider.language == "ur"
+        assert "Roman Urdu" in provider.transcription_prompt
         websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
         for _ in range(40):
             websocket.send_bytes(b"\x01\x00" * 160)
-        websocket.send_json({"type": "audio_turn_end"})
+        # Client VAD commits the OpenAI Realtime input buffer at each turn end.
+        websocket.send_json({"type": "audio_turn_end", "auto": True})
         events = []
         while not any(event.get("type") == "agent_response" for event in events):
             events.append(websocket.receive_json())
 
     assert any(event.get("type") == "transcript" and event.get("is_final") for event in events)
+
+
+def test_openai_voice_sends_prepared_acknowledgement_during_transcription_finalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    monkeypatch.setattr(settings, "openai_realtime_tts_enabled", True)
+
+    class ReadySTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def warmup(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            async for frame in audio:
+                if frame == b"":
+                    yield STTEvent(text="Mujhe ghar chahiye", is_final=True, speech_final=True)
+
+    class RealtimeTTS:
+        async def warmup(self) -> bool:
+            return True
+
+        async def aclose(self) -> None:
+            return None
+
+        async def synthesize_stream(self, text: str, language: str):
+            if text == "Ji, ek second.":
+                yield AudioChunk(0, b"\x01\x00" * 100, language, 24_000)
+                return
+            yield AudioChunk(0, b"\x02\x00" * 100, language, 24_000)
+            yield AudioChunk(1, b"", language, 24_000, is_final=True)
+
+    monkeypatch.setattr(api, "build_openai_realtime_stt", lambda config: ReadySTT())
+    monkeypatch.setattr(api, "OpenAIRealtimeSpeechProvider", lambda **kwargs: RealtimeTTS())
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: AgentDecision(kind="answer", spoken_text="I can help with that."),
+    )
+    monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "openai")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_end"})
+        while websocket.receive_json().get("state") != "processing":
+            pass
+        websocket.send_json({"type": "audio_turn_start"})
+        websocket.send_bytes(b"\x01\x00" * 160)
+        websocket.send_json({"type": "audio_turn_end"})
+        events = []
+        while True:
+            event = websocket.receive_json()
+            events.append(event)
+            if event.get("type") == "audio_chunk" and event.get("is_final") is True:
+                break
+
+    acknowledgement_index = next(
+        index for index, event in enumerate(events)
+        if event.get("type") == "audio_chunk" and event.get("acknowledgement") is True
+    )
+    agent_response_index = next(
+        index for index, event in enumerate(events)
+        if event.get("type") == "agent_response"
+    )
+    assert acknowledgement_index < agent_response_index
+    assert events[acknowledgement_index]["is_final"] is False
+    assert any(event.get("type") == "agent_response" for event in events)
+
+
+def test_hybrid_voice_keeps_one_stt_stream_for_multiple_browser_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    class BoundarySTT:
+        def __init__(self) -> None:
+            self.seen_boundaries = 0
+            self.streams = 0
+
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            self.streams += 1
+            async for frame in audio:
+                if frame == b"":
+                    self.seen_boundaries += 1
+                    yield STTEvent(
+                        text=f"Mujhe Karachi mein ghar chahiye {self.seen_boundaries}",
+                        is_final=True,
+                    )
+
+    class RealtimeTTS:
+        async def warmup(self) -> bool:
+            return True
+
+        async def aclose(self) -> None:
+            return None
+
+        async def synthesize_stream(self, text: str, language: str):
+            del text
+            yield AudioChunk(0, b"\x01\x00" * 80, language, 24_000)
+            yield AudioChunk(1, b"", language, 24_000, is_final=True)
+
+    provider = BoundarySTT()
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: provider)
+    monkeypatch.setattr(api, "tts", RealtimeTTS())
+    monkeypatch.setattr(api, "OpenAIRealtimeSpeechProvider", lambda **kwargs: RealtimeTTS())
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: AgentDecision(kind="answer", spoken_text="I can help with that."),
+    )
+    monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        while websocket.receive_json().get("audio_started") is not True:
+            pass
+        events = []
+        for _ in range(2):
+            turn_start_index = len(events)
+            websocket.send_json({"type": "audio_turn_start"})
+            websocket.send_bytes(b"\x01\x00" * 160)
+            websocket.send_json({"type": "audio_turn_end"})
+            while not any(
+                (event.get("type") == "audio_chunk" and event.get("is_final") is True)
+                or event.get("type") in {"stt_unavailable", "agent_unavailable"}
+                for event in events[turn_start_index:]
+            ):
+                events.append(_receive_json_timeout(websocket))
+
+    assert not any(event.get("type") in {"stt_unavailable", "agent_unavailable"} for event in events), events
+    assert provider.streams == 1
+    assert provider.seen_boundaries == 2
+    assert any(event.get("type") == "transcript" and event.get("is_final") for event in events)
+    assert any(
+        event.get("type") == "transcript" and event.get("speech_final") is True
+        for event in events
+    )
+    assert sum(event.get("type") == "agent_response" for event in events) == 2
+
+
+def test_hybrid_voice_processes_stable_final_arriving_before_browser_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    received: list[str] = []
+
+    class PrecommitFinalSTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            # Model a provider that returns a stable segment final before the
+            # browser VAD's explicit end-of-turn event arrives.
+            yield STTEvent(
+                text="Mujhe Karachi mein",
+                confidence=0.94,
+                is_final=True,
+                speech_final=False,
+                from_finalize=False,
+            )
+            async for frame in audio:
+                if frame == b"":
+                    yield STTEvent(
+                        text="ghar chahiye",
+                        confidence=0.92,
+                        is_final=True,
+                        speech_final=True,
+                    )
+
+    class FakeTTS:
+        async def synthesize_stream(self, text: str, language: str):
+            del text
+            yield AudioChunk(0, b"\x01\x00" * 80, language, 24_000)
+            yield AudioChunk(1, b"", language, 24_000, is_final=True)
+
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: PrecommitFinalSTT())
+    monkeypatch.setattr(api, "tts", FakeTTS())
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda _conversation_id, text, _language: (
+            received.append(text)
+            or AgentDecision(kind="answer", spoken_text="I can help with that.")
+        ),
+    )
+    monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        while websocket.receive_json().get("audio_started") is not True:
+            pass
+        websocket.send_json({"type": "audio_turn_start"})
+        websocket.send_bytes(b"\x01\x00" * 160)
+        websocket.send_json({"type": "audio_turn_end"})
+        events = []
+        while not any(event.get("type") == "agent_response" for event in events):
+            events.append(_receive_json_timeout(websocket))
+
+    assert received == ["Mujhe Karachi mein ghar chahiye"]
+    assert any(
+        event.get("type") == "transcript"
+        and event.get("is_final") is True
+        and event.get("speech_final") is True
+        for event in events
+    )
+
+
+def test_hybrid_voice_recovers_when_stt_closes_between_completed_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    class ClosingSTT:
+        def __init__(self) -> None:
+            self.streams = 0
+
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            self.streams += 1
+            async for frame in audio:
+                if frame == b"":
+                    yield STTEvent(text=f"Voice turn {self.streams}", is_final=True)
+                    # Some provider callbacks are delayed. A late speech-start
+                    # for the just-finalized turn must not cancel the reply.
+                    yield STTEvent(speech_started=True)
+                    return
+
+    class RealtimeTTS:
+        async def warmup(self) -> bool:
+            return True
+
+        async def aclose(self) -> None:
+            return None
+
+        async def synthesize_stream(self, text: str, language: str):
+            del text
+            yield AudioChunk(0, b"\x01\x00" * 80, language, 24_000)
+            yield AudioChunk(1, b"", language, 24_000, is_final=True)
+
+    provider = ClosingSTT()
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: provider)
+    monkeypatch.setattr(api, "OpenAIRealtimeSpeechProvider", lambda **kwargs: RealtimeTTS())
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: AgentDecision(kind="answer", spoken_text="I can help with that."),
+    )
+    monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        while websocket.receive_json().get("audio_started") is not True:
+            pass
+
+        completed_events = []
+        for turn_number in range(2):
+            websocket.send_json({"type": "audio_turn_start"})
+            if turn_number == 1:
+                # Confirm the next provider stream is already running before
+                # the first PCM frame for the follow-up turn is sent.
+                while True:
+                    event = _receive_json_timeout(websocket)
+                    completed_events.append(event)
+                    if (
+                        event.get("type") == "state"
+                        and event.get("state") == "listening"
+                        and event.get("interrupt_playback") is True
+                    ):
+                        break
+                assert provider.streams == 2
+            websocket.send_bytes(b"\x01\x00" * 160)
+            websocket.send_json({"type": "audio_turn_end"})
+            while True:
+                event = _receive_json_timeout(websocket)
+                completed_events.append(event)
+                if event.get("type") == "audio_chunk" and event.get("is_final") is True:
+                    break
+
+    assert provider.streams == 2
+    assert sum(event.get("type") == "agent_response" for event in completed_events) == 2
+    assert not any(event.get("type") == "stt_unavailable" for event in completed_events)
+
+
+def test_hybrid_voice_waits_for_browser_commit_after_provider_endpointing() -> None:
+    import app.api.app as api
+
+    early_endpoint = STTEvent(text="Mujhe ghar", is_final=True, speech_final=True)
+    finalized_after_commit = STTEvent(text="Mujhe ghar chahiye", is_final=True)
+
+    assert api._is_turn_final("hybrid", early_endpoint, browser_committed=False) is False
+    assert api._is_turn_final("hybrid", finalized_after_commit, browser_committed=True) is True
+    assert api._is_turn_final("openai", early_endpoint, browser_committed=False) is False
+    # Keep provider-owned end-of-turn behavior for the legacy standard route.
+    assert api._is_turn_final("standard", early_endpoint, browser_committed=False) is True
+
+
+def test_hybrid_finalize_deadline_covers_provider_read_started_before_browser_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    class HangingSTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            async for frame in audio:
+                if frame:
+                    yield STTEvent(text="partial transcript", confidence=0.9)
+                elif frame == b"":
+                    await asyncio.sleep(0.5)
+                    yield STTEvent(text="late stable transcript", is_final=True)
+
+    class NoAudioTTS:
+        async def synthesize_stream(self, text: str, language: str):
+            del text, language
+            if False:
+                yield
+
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: HangingSTT())
+    monkeypatch.setattr(api, "tts", NoAudioTTS())
+    monkeypatch.setattr(api, "openai_voice_tts", NoAudioTTS())
+    monkeypatch.setattr(api.settings, "openai_realtime_tts_enabled", False)
+    monkeypatch.setattr(api.settings, "stt_finalize_timeout_seconds", 0.05)
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: pytest.fail("A partial transcript must not reach the agent"),
+    )
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        while websocket.receive_json().get("audio_started") is not True:
+            pass
+        websocket.send_json({"type": "audio_turn_start"})
+        websocket.send_bytes(b"\x01\x00" * 160)
+        interim = websocket.receive_json()
+        while interim.get("type") != "transcript":
+            interim = websocket.receive_json()
+        assert interim["is_final"] is False
+        started_at = monotonic()
+        websocket.send_json({"type": "audio_turn_end"})
+        events = []
+        while not any(event.get("type") == "stt_unavailable" for event in events):
+            events.append(_receive_json_timeout(websocket, timeout_seconds=1))
+
+    failure = next(event for event in events if event.get("type") == "stt_unavailable")
+    assert failure["reason"] == "stt_finalize_timeout"
+    assert monotonic() - started_at < 0.4
+    assert not any(event.get("type") == "agent_response" for event in events)
+
+
+def test_hybrid_voice_speaks_a_safe_retry_after_finalize_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    class HangingSTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            async for frame in audio:
+                if frame:
+                    yield STTEvent(text="partial budget transcript", confidence=0.9)
+                elif frame == b"":
+                    await asyncio.sleep(0.5)
+                    yield STTEvent(text="unconfirmed final", is_final=True)
+
+    class SpeechProvider:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def is_ready(self) -> bool:
+            return True
+
+        async def synthesize_stream(self, text: str, language: str, voice_id=None):
+            del voice_id
+            self.prompts.append(text)
+            yield AudioChunk(0, b"provider-audio-fixture", language, is_final=True)
+
+    speech = SpeechProvider()
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: HangingSTT())
+    monkeypatch.setattr(api, "tts", speech)
+    monkeypatch.setattr(api, "openai_voice_tts", speech)
+    monkeypatch.setattr(api.settings, "openai_realtime_tts_enabled", False)
+    monkeypatch.setattr(api.settings, "stt_finalize_timeout_seconds", 0.05)
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: pytest.fail("An unconfirmed interim transcript must not reach the agent"),
+    )
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        while websocket.receive_json().get("audio_started") is not True:
+            pass
+        websocket.send_json({"type": "audio_turn_start"})
+        websocket.send_bytes(b"\x01\x00" * 160)
+        interim = websocket.receive_json()
+        while interim.get("type") != "transcript":
+            interim = websocket.receive_json()
+        assert interim["is_final"] is False
+        websocket.send_json({"type": "audio_turn_end"})
+        events = []
+        while not (
+            any(event.get("type") == "agent_response" for event in events)
+            and any(
+                event.get("type") == "audio_chunk"
+                and not event.get("acknowledgement")
+                and event.get("is_final") is True
+                for event in events
+            )
+        ):
+            events.append(_receive_json_timeout(websocket, timeout_seconds=1))
+
+    recovery = next(event for event in events if event.get("type") == "agent_response")
+    assert recovery["decision"]["reason"] == "transcription_incomplete"
+    from app.services.voice_recovery import transcription_recovery_prompt
+
+    assert recovery["decision"]["spoken_text"] == transcription_recovery_prompt(
+        "ur-Latn", "partial budget transcript"
+    )
+    assert speech.prompts[-1] == recovery["decision"]["spoken_text"]
+    assert not any(event.get("type") == "stt_unavailable" for event in events)
+
+
+def test_hybrid_voice_speaks_a_safe_retry_for_low_confidence_final(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.api.app as api
+    from app.repositories.database import Base
+
+    database_engine = create_engine(
+        f"sqlite:///{tmp_path / 'low-confidence-recovery.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(database_engine)
+    session_factory = sessionmaker(bind=database_engine, autocommit=False, autoflush=False)
+    monkeypatch.setattr(
+        api,
+        "voice_sessions",
+        VoiceSessionService(
+            f"low-confidence-recovery-key-{uuid4()}",
+            session_factory=session_factory,
+            dialect_name="sqlite",
+            max_active_total=2,
+        ),
+    )
+
+    class LowConfidenceSTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            async for frame in audio:
+                if frame == b"":
+                    yield STTEvent(
+                        text="unclear transcript",
+                        confidence=0.2,
+                        is_final=True,
+                        from_finalize=True,
+                    )
+
+    class SpeechProvider:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def is_ready(self) -> bool:
+            return True
+
+        async def synthesize_stream(self, text: str, language: str, voice_id=None):
+            del voice_id
+            self.prompts.append(text)
+            yield AudioChunk(0, b"retry-audio-fixture", language, is_final=True)
+
+    speech = SpeechProvider()
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: LowConfidenceSTT())
+    monkeypatch.setattr(api, "tts", speech)
+    monkeypatch.setattr(api, "openai_voice_tts", speech)
+    monkeypatch.setattr(api.settings, "openai_realtime_tts_enabled", False)
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: pytest.fail("A low-confidence final transcript must not reach the agent"),
+    )
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        while websocket.receive_json().get("audio_started") is not True:
+            pass
+        websocket.send_json({"type": "audio_turn_start"})
+        websocket.send_bytes(b"\x01\x00" * 160)
+        websocket.send_json({"type": "audio_turn_end"})
+        events = []
+        while not (
+            any(event.get("type") == "agent_response" for event in events)
+            and any(
+                event.get("type") == "audio_chunk"
+                and event.get("is_final") is True
+                and not event.get("acknowledgement")
+                for event in events
+            )
+        ):
+            events.append(_receive_json_timeout(websocket, timeout_seconds=1))
+
+    low_confidence = next(
+        event for event in events if event.get("type") == "transcript_low_confidence"
+    )
+    recovery = next(event for event in events if event.get("type") == "agent_response")
+    from app.services.voice_recovery import transcription_recovery_prompt
+
+    assert low_confidence["confidence"] == 0.2
+    assert recovery["decision"]["reason"] == "transcription_incomplete"
+    assert recovery["decision"]["spoken_text"] == transcription_recovery_prompt(
+        "ur-Latn", "unclear transcript"
+    )
+    assert speech.prompts[-1] == recovery["decision"]["spoken_text"]
+    assert any(
+        event.get("type") == "audio_chunk"
+        and event.get("is_final") is True
+        and event.get("response_id") == recovery["response_id"]
+        for event in events
+    )
+    database_engine.dispose()
+
+
+def test_hybrid_voice_plays_configured_tts_ack_before_manual_finalize_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.api.app as api
+
+    monkeypatch.setattr(settings, "openai_realtime_tts_enabled", False)
+
+    class FinalizeSTT:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            async for frame in audio:
+                if frame == b"":
+                    yield STTEvent(
+                        text="Mujhe Karachi mein ghar chahiye",
+                        is_final=True,
+                        from_finalize=True,
+                    )
+
+    class ConfiguredTTS:
+        async def is_ready(self) -> bool:
+            return True
+
+        async def synthesize_stream(self, text: str, language: str, voice_id=None):
+            del voice_id
+            marker = b"\x03\x00" if text == "Ji, ek second." else b"\x04\x00"
+            yield AudioChunk(0, marker * 100, language, 24_000)
+            if text != "Ji, ek second.":
+                yield AudioChunk(1, b"", language, 24_000, is_final=True)
+
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda config: FinalizeSTT())
+    monkeypatch.setattr(api, "tts", ConfiguredTTS())
+    monkeypatch.setattr(
+        api.agent,
+        "decision_provider",
+        SimpleNamespace(failure_cooldown_remaining=12.3),
+    )
+    monkeypatch.setattr(
+        api.agent,
+        "respond",
+        lambda *args: AgentDecision(kind="answer", spoken_text="I found your request."),
+    )
+    monkeypatch.setattr(api.transcripts, "append", lambda *args: None)
+    issued = api.voice_sessions.issue("testclient", "http://localhost:5173", "hybrid")
+    assert issued is not None
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect(
+            "/v1/voice", headers={"origin": "http://localhost:5173"}
+        ) as websocket,
+    ):
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        while websocket.receive_json().get("audio_started") is not True:
+            pass
+        websocket.send_json({"type": "audio_turn_start"})
+        websocket.send_bytes(b"\x01\x00" * 160)
+        websocket.send_json({"type": "audio_turn_end"})
+        events = []
+        while not any(event.get("type") == "audio_chunk" and event.get("is_final") for event in events):
+            events.append(websocket.receive_json())
+
+    acknowledgement_index = next(
+        index for index, event in enumerate(events)
+        if event.get("type") == "audio_chunk" and event.get("acknowledgement") is True
+    )
+    agent_response_index = next(
+        index for index, event in enumerate(events)
+        if event.get("type") == "agent_response"
+    )
+    assert acknowledgement_index < agent_response_index
+    assert events[acknowledgement_index]["is_final"] is False
+    response = next(event for event in events if event.get("type") == "agent_response")
+    assert response["reasoning_status"] == "cooldown"
 
 
 @pytest.mark.parametrize('first_chunk,reason', [(False, 'tts_first_audio_timeout'), (True, 'tts_idle_timeout')])
@@ -648,3 +1778,106 @@ def test_stt_unexpected_completion_can_restart_without_dead_queue(monkeypatch):
             assert event['reason'] == 'stt_stream_ended'
             assert event['recoverable'] is True and event['restart_required'] is True
         assert len(calls) == 2
+
+
+def test_stt_stream_drop_recovers_on_next_live_audio_frame(monkeypatch):
+    import app.api.app as api
+
+    monkeypatch.setattr(
+        api,
+        "voice_sessions",
+        VoiceSessionService(
+            f"stt-recovery-test-key-{uuid4()}",
+            issue_limit=50,
+            max_active_total=100,
+            max_active_per_client=50,
+        ),
+    )
+    calls = []
+
+    class RecoveringSTT:
+        async def is_ready(self):
+            return True
+
+        async def stream(self, audio):
+            calls.append(True)
+            if len(calls) == 1:
+                return
+            async for frame in audio:
+                if frame:
+                    continue
+                if False:
+                    yield
+
+    monkeypatch.setattr(api, "stt", RecoveringSTT())
+    with TestClient(app) as client, client.websocket_connect(
+        "/v1/voice", headers={"origin": "http://localhost:5173"}
+    ) as websocket:
+        _authenticate_voice_socket(websocket, _voice_ticket())
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        assert websocket.receive_json()["audio_started"] is True
+        assert websocket.receive_json()["type"] == "stt_unavailable"
+
+        websocket.send_bytes(b"\x01\x00" * 160)
+        recovery = websocket.receive_json()
+        assert recovery["type"] == "state"
+        assert recovery["audio_recovered"] is True
+        assert recovery["audio_started"] is True
+        assert len(calls) == 2
+
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        acknowledgement = websocket.receive_json()
+        assert acknowledgement["type"] == "state"
+        assert acknowledgement["audio_started"] is True
+        assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("provider_message", "expected_reason"),
+    (
+        ("provider failure", "stt_provider_error"),
+        ("HTTP 401 unauthorized private-test-secret", "stt_provider_auth_rejected"),
+    ),
+)
+def test_stt_provider_failure_after_normal_audio_end_is_reported(
+    monkeypatch, provider_message: str, expected_reason: str
+):
+    import app.api.app as api
+
+    monkeypatch.setattr(
+        api,
+        "voice_sessions",
+        VoiceSessionService(
+            f"provider-error-test-key-{uuid4()}",
+            issue_limit=50,
+            max_active_total=100,
+            max_active_per_client=50,
+        ),
+    )
+
+    class FailingSTT:
+        async def is_ready(self):
+            return True
+
+        async def stream(self, audio):
+            async for _ in audio:
+                pass
+            raise RuntimeError(provider_message)
+            yield
+
+    monkeypatch.setattr(api, "stt", FailingSTT())
+    with TestClient(app) as client, client.websocket_connect(
+        "/v1/voice", headers={"origin": "http://localhost:5173"}
+    ) as websocket:
+        _authenticate_voice_socket(websocket, _voice_ticket())
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        assert websocket.receive_json()["audio_started"] is True
+        websocket.send_json({"type": "audio_end"})
+        event = websocket.receive_json()
+        while event.get("type") != "stt_unavailable":
+            event = websocket.receive_json()
+        assert event["type"] == "stt_unavailable"
+        assert event["reason"] == expected_reason
+        assert "private-test-secret" not in str(event)
+        assert event["recoverable"] is True
+        assert event["restart_required"] is True

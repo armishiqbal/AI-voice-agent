@@ -78,6 +78,32 @@ async def test_pipeline_synthesize_clauses_orders_and_completes():
 
 
 @pytest.mark.asyncio
+async def test_next_clause_starts_after_first_audio_is_available():
+    second_started = asyncio.Event()
+    hold_first = asyncio.Event()
+
+    class Provider:
+        async def synthesize_stream(self, text, language):
+            if text == "First.":
+                yield AudioChunk(sequence=0, audio=b"\x00\x00", language=language)
+                await hold_first.wait()
+            else:
+                second_started.set()
+                yield AudioChunk(sequence=0, audio=b"\x00\x00", language=language)
+
+    stream = pipeline_synthesize_clauses(Provider(), "First. Second.")
+    try:
+        first = await asyncio.wait_for(anext(stream), timeout=1)
+        assert first.audio
+        assert not second_started.is_set()
+        await asyncio.sleep(0)
+        assert second_started.is_set()
+    finally:
+        await asyncio.wait_for(stream.aclose(), timeout=1)
+        hold_first.set()
+
+
+@pytest.mark.asyncio
 async def test_pipeline_synthesize_clauses_disabled_fallback():
     provider = MockStreamingTTS(chunk_delay=0.001)
     text = "Single sentence fallback."

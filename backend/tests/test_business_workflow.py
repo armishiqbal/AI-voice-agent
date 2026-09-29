@@ -31,7 +31,11 @@ def test_n8n_configuration_requires_https_and_paired_token():
         n8n_webhook_token="secret",
         google_token_path=None,
     )
-    assert set(build_outbox_handlers(settings)) == {"lead.created", "voice.call_completed"}
+    assert set(build_outbox_handlers(settings)) == {
+        "lead.created",
+        "lead.follow_up_due",
+        "voice.call_completed",
+    }
 
 
 @pytest.mark.asyncio
@@ -88,15 +92,71 @@ async def test_n8n_requires_matching_completion_and_redacts_contacts(monkeypatch
     assert captured[0]["event"] == {"lead_id": "lead-1", "event_type": "lead.created"}
 
 
+@pytest.mark.asyncio
+async def test_n8n_follow_up_event_forwards_only_approved_reminder_fields(monkeypatch):
+    captured = []
+
+    def respond(request):
+        event = json.loads(request.content)
+        captured.append(event)
+        return httpx.Response(
+            200,
+            json={"event_id": event["event_id"], "status": "delivered"},
+        )
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        "app.integrations.n8n.httpx.AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs),
+    )
+    await N8nCrmHandler("https://workflow.example/webhook", "secret")({
+        "event_type": "lead.follow_up_due",
+        "lead_id": "lead-1",
+        "intent": "sell",
+        "city": "Karachi",
+        "area": "DHA Phase 6",
+        "follow_up_at": "2026-09-29T12:00:00+00:00",
+        "client_name": "Private Name",
+        "contact_email": "private@example.com",
+        "notes": "private notes",
+    })
+
+    assert captured[0]["event"] == {
+        "event_type": "lead.follow_up_due",
+        "lead_id": "lead-1",
+        "intent": "sell",
+        "city": "Karachi",
+        "area": "DHA Phase 6",
+        "follow_up_at": "2026-09-29T12:00:00+00:00",
+    }
+
+
 def test_n8n_export_has_auth_and_requires_completed_crm():
     workflow = json.loads(
         (Path(__file__).parents[2] / "workflows/n8n/awaaz-business-events.json").read_text()
     )
-    nodes = workflow["nodes"]
-    assert nodes[0]["parameters"]["authentication"] == "headerAuth"
-    assert nodes[0]["parameters"]["responseMode"] == "responseNode"
-    assert "delivered" in nodes[-2]["parameters"]["jsCode"]
+    nodes = {node["name"]: node for node in workflow["nodes"]}
+    webhook = nodes["After Call Intent Property Appointment"]
+    validate = nodes["Validate Calendar and Email Receipts"]
+    crm = nodes["Idempotent CRM Update"]
+    confirm = nodes["Require Durable CRM Acknowledgement"]
+    respond = nodes["Acknowledge Outbox"]
+
+    assert webhook["parameters"]["authentication"] == "headerAuth"
+    assert webhook["parameters"]["responseMode"] == "responseNode"
+    assert "Calendar delivery not confirmed" in validate["parameters"]["jsCode"]
+    assert "Employee email delivery not confirmed" in validate["parameters"]["jsCode"]
+    assert crm["retryOnFail"] is True and crm["maxTries"] == 3
+    assert crm["parameters"]["url"] == "={{ $env.AWAAZ_CRM_WEBHOOK_URL }}"
+    headers = crm["parameters"]["headerParameters"]["parameters"]
+    assert {header["name"] for header in headers} == {"Idempotency-Key"}
+    assert crm["parameters"]["options"]["redirect"]["redirect"]["followRedirects"] is False
+    assert "delivered" in confirm["parameters"]["jsCode"]
+    assert respond["parameters"]["options"]["responseCode"] == 200
     assert workflow["active"] is False
+    assert workflow["settings"]["saveDataSuccessExecution"] == "none"
+    assert workflow["settings"]["saveDataErrorExecution"] == "none"
+    assert all(not node.get("credentials") for node in workflow["nodes"])
 
 
 def test_employee_recipient_resolved_from_operator_directory(monkeypatch):

@@ -1,8 +1,8 @@
 """Persist optional CRM follow-up reminders for consented leads."""
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0019_lead_follow_up"
 down_revision = "0018_conversation_preferences"

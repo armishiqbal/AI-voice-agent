@@ -162,7 +162,7 @@ async def pipeline_synthesize_clauses(
     ]
     tasks: list[asyncio.Task[None]] = []
 
-    # Launch clause 0 and clause 1 immediately for early prefetching
+    # Give the first clause provider access until its first audio is ready.
     def launch_clause(index: int) -> None:
         if index < len(clauses) and index >= len(tasks):
             clause_str = clauses[index]
@@ -180,20 +180,18 @@ async def pipeline_synthesize_clauses(
 
     try:
         launch_clause(0)
-        if len(clauses) > 1:
-            launch_clause(1)
 
         for index, queue in enumerate(clause_queues):
-            # Prefetch subsequent clause
-            if index + 1 < len(clauses):
-                launch_clause(index + 1)
-
+            next_clause_launched = False
             while True:
                 item = await queue.get()
                 if item is None:
                     break
                 if isinstance(item, Exception):
                     raise item
+                if not next_clause_launched and index + 1 < len(clauses):
+                    launch_clause(index + 1)
+                    next_clause_launched = True
                 last_sample_rate = item.sample_rate
                 last_encoding = item.encoding
                 yield AudioChunk(
@@ -205,6 +203,10 @@ async def pipeline_synthesize_clauses(
                     is_final=False,
                 )
                 global_sequence += 1
+
+            # An empty provider response must not strand later clauses.
+            if not next_clause_launched and index + 1 < len(clauses):
+                launch_clause(index + 1)
 
         if global_sequence > 0:
             yield AudioChunk(

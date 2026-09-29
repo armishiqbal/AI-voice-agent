@@ -17,7 +17,7 @@ No call, email or CRM mutation is performed merely by importing this file. Googl
 ## Data and failure contract
 
 - Appointment events: `appointment.booked`, `appointment.rescheduled`, `appointment.cancelled`.
-- CRM events: `lead.created`, `voice.call_completed`. Follow-up timestamps are forwarded with leads; call transcript/preferences remain in the application database. Sending campaigns is a future enhancement and is not performed automatically.
+- CRM events: `lead.created`, `lead.follow_up_due`, `voice.call_completed`. The worker emits one durable `lead.follow_up_due` event when a consented lead's scheduled follow-up becomes due; the CRM can create an operator task. Call transcript/preferences remain in the application database. Client email/SMS campaigns are not sent automatically.
 - The allowlist forwards IDs, assigned employee, time, preferences and follow-up time. It excludes customer names, contact email/phone, encrypted contact fields, raw transcript and notes. Provider receipts forward only provider/status.
 - The workflow's HTTP node retries three times; failures propagate to the synchronous webhook. The Python worker uses exponential backoff, a bounded attempt count and leased claims. `/v1/admin/outbox` exposes pending/failing deliveries to authorized operators.
 - Successful provider receipts are retained when a later integration fails. A retry skips those providers, avoiding repeated Calendar/email calls caused by an n8n failure. There remains a process-crash window between a remote provider accepting a side effect and its local receipt being saved; Gmail does not provide an exactly-once send guarantee. Investigate ambiguous email delivery before manually replaying an exhausted event.

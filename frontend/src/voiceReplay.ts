@@ -5,6 +5,20 @@ export type ReplayChunk = {
   isFinal: boolean;
 };
 
+export interface ReplayPlaybackTarget {
+  enqueueEncoded(audio: string, isFinal: boolean): void;
+  playPcm16(audio: string, sampleRate: number): void;
+  finish(): void;
+}
+
+export function enqueueReplay(chunks: readonly ReplayChunk[], playback: ReplayPlaybackTarget): void {
+  for (const chunk of chunks) {
+    if (chunk.encoding === "audio/mpeg") playback.enqueueEncoded(chunk.audio, chunk.isFinal);
+    else playback.playPcm16(chunk.audio, chunk.sampleRate);
+  }
+  if (chunks.at(-1)?.encoding === "pcm_s16le") playback.finish();
+}
+
 const DEFAULT_MAX_AUDIO_CHARS = 8 * 1024 * 1024;
 
 export class BoundedAudioReplay {

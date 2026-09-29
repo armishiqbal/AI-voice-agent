@@ -1,6 +1,6 @@
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0006_tool_audit_events"
 down_revision = "0005_import_provenance"

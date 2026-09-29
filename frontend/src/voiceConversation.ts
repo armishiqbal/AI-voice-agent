@@ -1,6 +1,15 @@
-/** Voice calls must use a ready server provider; never start browser-only recognition. */
-export function resolveLiveVoiceAction(voiceReady: boolean): "connect" | "blocked" {
-  return voiceReady ? "connect" : "blocked";
+/** Block only on confirmed unavailability; unknown readiness is verified by the session API. */
+export function resolveLiveVoiceAction(voiceReady: boolean | null): "connect" | "blocked" {
+  return voiceReady === false ? "blocked" : "connect";
+}
+
+/** Recover briefly from network loss and backend restarts while the caller still wants voice. */
+export function shouldAutoReconnectVoice(code: number, sessionRequested: boolean, attempts: number): boolean {
+  return sessionRequested && attempts < 3 && (code === 1006 || code === 1012);
+}
+
+export function voiceReconnectDelayMs(attempt: number): number {
+  return [500, 1_000, 2_000][Math.min(Math.max(Math.trunc(attempt), 1), 3) - 1];
 }
 
 /** Intentional stops must not let an old socket overwrite the next call's UI. */

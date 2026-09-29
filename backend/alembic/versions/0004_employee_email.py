@@ -1,6 +1,6 @@
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0004_employee_email"
 down_revision = "0003_outbox_leases"

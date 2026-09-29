@@ -1,8 +1,8 @@
 """Persist bounded deterministic tool results in conversation snapshots."""
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0016_conversation_tool_results"
 down_revision = "0015_appointment_contact_phone"

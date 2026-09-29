@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from "react";
 
 type NeuralOrbProps = {
-  voicePhase: "checking" | "blocked" | "idle" | "connecting" | "authenticating" | "listening" | "thinking" | "speaking" | "error";
+  voicePhase: "checking" | "blocked" | "idle" | "connecting" | "authenticating" | "starting_microphone" | "listening" | "thinking" | "speaking" | "error";
   isAudioActive?: boolean;
   onClick?: () => void;
   audioAnalyser?: AnalyserNode | null;
@@ -43,8 +43,10 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
+    if (animFrameRef.current !== null) cancelAnimationFrame(animFrameRef.current);
     let time = 0;
     const freqData = new Uint8Array(64);
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
     const render = () => {
       time += 0.016;
@@ -274,23 +276,50 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
       ctx.arc(centerX, centerY, flareSize, 0, Math.PI * 2);
       ctx.fill();
 
-      animFrameRef.current = requestAnimationFrame(render);
+      animFrameRef.current = document.hidden || reducedMotion.matches
+        ? null
+        : requestAnimationFrame(render);
     };
 
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        if (animFrameRef.current !== null) cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = null;
+        return;
+      }
+      render();
+    };
+    const handleMotionPreferenceChange = () => {
+      if (animFrameRef.current !== null) cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+      render();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    reducedMotion.addEventListener("change", handleMotionPreferenceChange);
     render();
 
     return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      reducedMotion.removeEventListener("change", handleMotionPreferenceChange);
+      if (animFrameRef.current !== null) cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
     };
   }, [voicePhase, isAudioActive, audioAnalyser]);
 
   return (
-    <div
+    <button
+      type="button"
       className="neural-orb-container"
       onClick={onClick}
-      role="button"
-      tabIndex={0}
-      title="Awaaz Neural Orbit — Click to start voice or toggle call"
+      aria-label={voicePhase === "connecting" || voicePhase === "authenticating" || voicePhase === "starting_microphone"
+        ? "Voice chat is connecting"
+        : voicePhase === "listening" || voicePhase === "thinking" || voicePhase === "speaking"
+          ? "Stop voice chat"
+          : "Start or retry voice chat"}
+      aria-busy={voicePhase === "connecting" || voicePhase === "authenticating" || voicePhase === "starting_microphone"}
+      aria-pressed={voicePhase === "listening" || voicePhase === "thinking" || voicePhase === "speaking"}
+      title="Start or stop voice chat"
     >
       <canvas
         ref={canvasRef}
@@ -298,6 +327,6 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
         height={500}
         className={`neural-orb-canvas state-${voicePhase}`}
       />
-    </div>
+    </button>
   );
 }

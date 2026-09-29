@@ -1,8 +1,8 @@
 """Persist structured preference fields used by deterministic recommendation ranking."""
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0018_conversation_preferences"
 down_revision = "0017_property_investment_goals"

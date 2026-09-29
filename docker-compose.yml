@@ -46,7 +46,7 @@ services:
         condition: service_completed_successfully
   n8n:
     profiles: [automation]
-    image: ${N8N_IMAGE:-docker.n8n.io/n8nio/n8n:latest}
+    image: ${N8N_IMAGE:-docker.n8n.io/n8nio/n8n:2.40.7}
     ports: ["127.0.0.1:5678:5678"]
     environment:
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
