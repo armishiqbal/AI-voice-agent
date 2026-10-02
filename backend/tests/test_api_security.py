@@ -225,6 +225,7 @@ def test_state_changing_admin_routes_have_dependency() -> None:
     protected_paths = {
         "/v1/properties/import",
         "/v1/properties/import-file",
+        "/v1/properties/validate-file",
         "/v1/knowledge/ingest-file",
         "/v1/admin/metrics",
         "/v1/admin/evaluations/report",
@@ -263,15 +264,16 @@ def test_admin_metrics_exposes_due_follow_ups_without_contact_fields(
     assert "client_name" not in body["follow_ups_due"][0]
 
 
-def test_inventory_file_import_reports_row_errors_and_refreshes_real_listing_route(
+def test_inventory_file_preview_and_import_are_all_or_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sqlalchemy import delete
+    from sqlalchemy import func, select
 
     from app.repositories.database import SessionLocal
     from app.repositories.records import PropertyImportBatchRecord, PropertyRecord
 
     import_id = f"UPLOAD-{uuid4()}"
+    source_label = f"owner-reviewed-{uuid4()}"
     csv_body = (
         b"id,title,city,area,purpose,price_pkr,bedrooms,size_sqft,amenities,developer,"
         b"payment_plan,available,assigned_employee,source_version\n"
@@ -281,32 +283,87 @@ def test_inventory_file_import_reports_row_errors_and_refreshes_real_listing_rou
         + b"Installments,true,Ayesha,rev-1\n"
     )
     monkeypatch.setattr(settings, "app_env", "development")
+    with TestClient(app) as client:
+        params = {
+            "filename": "owner-inventory.csv",
+            "source": source_label,
+        }
+        preview = client.post(
+            "/v1/properties/validate-file", params=params, content=csv_body
+        )
+        assert preview.status_code == 200
+        assert preview.json()["accepted"] == 1
+        assert preview.json()["rejected"] == 1
+        assert preview.json()["validation_errors"][0]["row"] == 3
+        assert preview.json()["validation_errors"][0]["field"] == "price_pkr"
+
+        rejected_import = client.post(
+            "/v1/properties/import-file", params=params, content=csv_body
+        )
+        assert rejected_import.status_code == 422
+        assert rejected_import.json()["detail"]["accepted"] == 1
+        assert rejected_import.json()["detail"]["rejected"] == 1
+        assert all(row["id"] != import_id for row in client.get("/v1/properties").json())
+
+    with SessionLocal() as session:
+        assert session.get(PropertyRecord, import_id) is None
+        batch_count = session.scalar(
+            select(func.count())
+            .select_from(PropertyImportBatchRecord)
+            .where(PropertyImportBatchRecord.source == source_label)
+        )
+        assert batch_count == 0
+
+
+def test_clean_inventory_preview_can_be_confirmed_and_imported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import delete
+
+    from app.repositories.database import SessionLocal
+    from app.repositories.records import PropertyImportBatchRecord, PropertyRecord
+
+    import_id = f"UPLOAD-{uuid4()}"
+    csv_body = (
+        b"id,title,city,area,purpose,price_pkr,bedrooms,size_sqft,developer,payment_plan,available,assigned_employee,source_version\n"
+        + f"{import_id},Reviewed home,Karachi,DHA,sale,25000000,3,1800,Owner,".encode()
+        + b"Installments,true,Ayesha,approved-rev-1\n"
+    )
+    monkeypatch.setattr(settings, "app_env", "development")
     batch_id: str | None = None
     try:
         with TestClient(app) as client:
-            response = client.post(
-                "/v1/properties/import-file",
-                params={"filename": "owner-inventory.csv", "source": "owner-reviewed-rev-1"},
-                content=csv_body,
+            params = {
+                "filename": "owner-inventory.csv",
+                "source": "owner-reviewed-rev-1",
+            }
+            preview = client.post(
+                "/v1/properties/validate-file", params=params, content=csv_body
             )
-            assert response.status_code == 202
-            result = response.json()
+            assert preview.status_code == 200
+            assert preview.json()["accepted"] == 1
+            assert preview.json()["rejected"] == 0
+
+            imported = client.post(
+                "/v1/properties/import-file", params=params, content=csv_body
+            )
+            assert imported.status_code == 202
+            result = imported.json()
             batch_id = result["batch_id"]
             assert result["accepted"] == 1
-            assert result["rejected"] == 1
-            assert result["validation_errors"][0]["row"] == 3
-            assert result["validation_errors"][0]["field"] == "price_pkr"
-
-            inventory = client.get("/v1/properties").json()
-            imported = next(row for row in inventory if row["id"] == import_id)
-            assert imported["source"] == "owner-reviewed-rev-1"
-            assert imported["available"] is True
+            assert result["rejected"] == 0
+            rows = client.get("/v1/properties").json()
+            property_item = next(row for row in rows if row["id"] == import_id)
+            assert property_item["source"] == "owner-reviewed-rev-1"
+            assert property_item["source_version"] == "approved-rev-1"
     finally:
         with SessionLocal.begin() as session:
             session.execute(delete(PropertyRecord).where(PropertyRecord.id == import_id))
             if batch_id:
                 session.execute(
-                    delete(PropertyImportBatchRecord).where(PropertyImportBatchRecord.id == batch_id)
+                    delete(PropertyImportBatchRecord).where(
+                        PropertyImportBatchRecord.id == batch_id
+                    )
                 )
 
 

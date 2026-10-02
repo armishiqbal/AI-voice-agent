@@ -56,9 +56,17 @@ def _coerce_row(row: dict[str, Any]) -> dict[str, Any]:
 def _validate_rows(rows: list[dict[str, Any]], source: str) -> InventoryImportResult:
     records: list[Property] = []
     errors: list[ImportIssue] = []
+    seen_ids: set[str] = set()
     for row_number, row in enumerate(rows, start=2):
         try:
-            records.append(Property.model_validate(_coerce_row(row)))
+            record = Property.model_validate(_coerce_row(row))
+            if record.id in seen_ids:
+                errors.append(
+                    ImportIssue(row_number, "id", "Property ID is duplicated in this file")
+                )
+                continue
+            seen_ids.add(record.id)
+            records.append(record)
         except (ValidationError, ValueError, TypeError) as error:
             if isinstance(error, ValidationError):
                 for issue in error.errors():
@@ -73,6 +81,9 @@ def _validate_rows(rows: list[dict[str, Any]], source: str) -> InventoryImportRe
 
 
 def parse_inventory_bytes(data: bytes, filename: str, source: str) -> InventoryImportResult:
+    source = source.strip()
+    if not 3 <= len(source) <= 200:
+        raise ValueError("Inventory source label must contain 3-200 characters")
     suffix = Path(filename).suffix.lower()
     if suffix == ".json":
         payload = json.loads(data.decode("utf-8"))

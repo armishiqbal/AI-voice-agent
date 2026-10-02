@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildInventoryImportUrl, buildInventoryTemplateDataUrl, parseInventoryImportResult } from "../src/inventoryImport.mjs";
+import {
+  buildInventoryImportUrl,
+  buildInventoryTemplateDataUrl,
+  buildInventoryValidateUrl,
+  parseInventoryImportResult,
+  parseInventoryValidationResult,
+} from "../src/inventoryImport.mjs";
 
 test("downloadable inventory template contains the import schema and no sample property rows", () => {
   const url = buildInventoryTemplateDataUrl();
@@ -20,6 +26,28 @@ test("inventory import URL encodes filename and source and removes API URL trail
     buildInventoryImportUrl("http://localhost:8000/", "DHA phase 6.csv", "Owner export & review"),
     "http://localhost:8000/v1/properties/import-file?filename=DHA+phase+6.csv&source=Owner+export+%26+review",
   );
+});
+
+test("inventory validation URL uses the preview endpoint", () => {
+  assert.equal(
+    buildInventoryValidateUrl("http://localhost:8000/", "company.csv", "approved rev 2"),
+    "http://localhost:8000/v1/properties/validate-file?filename=company.csv&source=approved+rev+2",
+  );
+});
+
+test("inventory validation response is parsed without requiring an import batch", () => {
+  assert.deepEqual(parseInventoryValidationResult({
+    accepted: 3,
+    rejected: 1,
+    source: "approved-v2",
+    validation_errors: [{ row: 5, field: "id", message: "Duplicate property ID" }],
+  }), {
+    accepted: 3,
+    rejected: 1,
+    source: "approved-v2",
+    validationErrors: [{ row: 5, field: "id", message: "Duplicate property ID" }],
+  });
+  assert.equal(parseInventoryValidationResult({ accepted: 3, rejected: 0 }), null);
 });
 
 test("inventory import response parser keeps only validated server fields", () => {

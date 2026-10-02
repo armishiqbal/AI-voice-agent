@@ -42,6 +42,19 @@ def test_json_import_accepts_properties_envelope() -> None:
     assert result.errors == []
 
 
+def test_inventory_import_marks_duplicate_ids_as_rejected_rows() -> None:
+    data = (
+        b"id,title,city,area,purpose,price_pkr,bedrooms,size_sqft,developer,payment_plan,available,assigned_employee\n"
+        b"P-1,House,Karachi,DHA,sale,25000000,3,1800,Dev,Installments,true,Ayesha\n"
+        b"P-1,Apartment,Karachi,Clifton,rent,150000,2,900,Dev,Monthly,true,Ali\n"
+    )
+
+    result = parse_inventory_bytes(data, "inventory.csv", "owner-reviewed-v1")
+
+    assert [item.title for item in result.records] == ["House"]
+    assert [(issue.row, issue.field) for issue in result.errors] == [(3, "id")]
+
+
 def test_chunking_preserves_source_and_overlap() -> None:
     chunks = chunk_text("a" * 1_000, "brochure.pdf", chunk_size=200, overlap=25)
     assert len(chunks) > 1

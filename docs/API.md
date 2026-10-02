@@ -37,9 +37,14 @@
   investment goals, provenance, and assigned employee.
 - `GET /v1/properties/{property_id}` — available property details; unavailable records return 404.
 - `POST /v1/properties/import` — validated Pydantic JSON import with source and batch ID.
-- `POST /v1/properties/import-file?filename=inventory.csv&source=crm-export-v1` — raw CSV/JSON
-  upload with row-level validation; accepted and rejected rows are both recorded in the batch ledger.
-- `python scripts/data/import_inventory.py` — CSV/JSON importer with row-level validation errors.
+- `POST /v1/properties/validate-file?filename=inventory.csv&source=crm-export-v1` — admin-protected
+  CSV/JSON preview. Returns accepted/rejected counts and row issues without writing inventory or a batch.
+- `POST /v1/properties/import-file?filename=inventory.csv&source=crm-export-v1` — admin-protected
+  CSV/JSON import. Empty files or files with any rejected/duplicate row return 422 and write no listings;
+  revalidated, fully clean files are imported as one batch.
+- `python scripts/data/import_inventory.py path.csv --source crm-export-v1 --dry-run` — validate
+  locally without creating a schema, batch, or listing. A normal import also refuses any rejected or
+  empty file.
 - `POST /v1/knowledge/ingest-file?filename=brochure.pdf&source=brochure-v1&property_id={id-returned-by-GET-v1-properties}`
   — chunks a PDF/text brochure or FAQ and upserts it to Pinecone when configured; returns 503
   instead of pretending ingestion succeeded when the provider is absent.

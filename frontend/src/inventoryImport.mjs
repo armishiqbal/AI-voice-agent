@@ -14,18 +14,22 @@ export function buildInventoryImportUrl(apiUrl, filename, source) {
   return `${apiUrl.replace(/\/+$/, "")}/v1/properties/import-file?${query.toString()}`;
 }
 
+export function buildInventoryValidateUrl(apiUrl, filename, source) {
+  const query = new URLSearchParams({ filename, source });
+  return `${apiUrl.replace(/\/+$/, "")}/v1/properties/validate-file?${query.toString()}`;
+}
+
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function parseInventoryImportResult(value) {
+export function parseInventoryValidationResult(value) {
   if (!isRecord(value)) return null;
-  const { accepted, rejected, source, batch_id: batchId, validation_errors: rawErrors } = value;
+  const { accepted, rejected, source, validation_errors: rawErrors } = value;
   if (
     !Number.isInteger(accepted) || accepted < 0
     || !Number.isInteger(rejected) || rejected < 0
     || typeof source !== "string"
-    || typeof batchId !== "string"
     || !Array.isArray(rawErrors)
   ) return null;
 
@@ -35,5 +39,11 @@ export function parseInventoryImportResult(value) {
     if (!Number.isInteger(row) || typeof field !== "string" || typeof message !== "string") return [];
     return [{ row, field, message }];
   });
-  return { accepted, rejected, source, batchId, validationErrors };
+  return { accepted, rejected, source, validationErrors };
+}
+
+export function parseInventoryImportResult(value) {
+  const preview = parseInventoryValidationResult(value);
+  if (!preview || !isRecord(value) || typeof value.batch_id !== "string") return null;
+  return { ...preview, batchId: value.batch_id };
 }

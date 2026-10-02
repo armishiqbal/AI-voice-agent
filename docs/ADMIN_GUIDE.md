@@ -2,12 +2,15 @@
 
 ## Inventory and knowledge
 
-- Import CSV/JSON with `python scripts/data/import_inventory.py path.csv --source crm-export-v1`.
+- Validate CSV/JSON first with `python scripts/data/import_inventory.py path.csv --source crm-export-v1 --dry-run`.
+  A normal command imports only after every row passes and the file contains at least one property.
+  The admin endpoint and browser panel follow the same all-or-nothing rule.
 - The browser's inventory panel offers a headers-only CSV template. It contains no example listings; fill it with owner-approved records. Use `sale`, `rent`, `commercial`, or `investment` for purpose; enter prices as positive PKR integers; use `true`/`false` for availability; list-valued columns use `|` separators. Unknown availability values are rejected instead of silently becoming `false`.
 - Ingest brochures/FAQs with `python scripts/data/ingest_knowledge.py path.pdf --source brochure-v1`.
   For property-specific documents, use a property ID returned by `GET /v1/properties` after
   importing owner-approved inventory; there is no bundled runtime listing ID.
-- Inspect import validation errors and provenance before treating records as authoritative.
+- The browser first previews accepted/rejected counts and row errors. Fix every rejected or duplicate-ID row, validate the corrected file again, then explicitly confirm the import. No listing changes before a clean preview; the backend revalidates during commit.
+- Inspect the import batch ID, source label, source version, and listing count before treating records as authoritative.
 - Outside development, send `X-Admin-Api-Key: $ADMIN_API_KEY` for inventory imports, knowledge
   ingestion, metrics, evaluation, outbox, and audit endpoints. The consented lead form is public
   for the browser and must validate `consent: true`.

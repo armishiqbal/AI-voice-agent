@@ -87,6 +87,7 @@ from app.repositories.records import OutboxEventRecord, ToolAuditEventRecord
 from app.repositories.transcripts import TranscriptStore
 from app.repositories.voice_outcomes import record_voice_call_outcome
 from app.services.appointments import redact_for_retention
+from app.services.ingestion import InventoryImportResult, parse_inventory_bytes
 from app.services.voice_acknowledgement import (
     VoiceAcknowledgementCache,
     prepare_acknowledgement,
@@ -631,36 +632,65 @@ def import_properties(payload: PropertyImport):
     }
 
 
-@app.post(
-    "/v1/properties/import-file", status_code=202, dependencies=[Depends(require_admin_api_key)]
-)
-async def import_inventory_file(request: Request, filename: str, source: str):
-    """Validate a CSV/JSON inventory upload without trusting model-generated fields.
-
-    The raw request body keeps this endpoint usable without a multipart dependency. Clients
-    send the file bytes and provide the original filename and immutable source label as query
-    parameters. Invalid rows are recorded in the import-batch ledger and never imported.
-    """
-    from app.services.ingestion import parse_inventory_bytes
-
+async def _parse_inventory_upload(
+    request: Request,
+    filename: str,
+    source: str,
+) -> InventoryImportResult:
     body = await request.body()
     if len(body) > settings.max_upload_bytes:
         raise HTTPException(413, "Inventory upload exceeds MAX_UPLOAD_BYTES")
     try:
-        result = parse_inventory_bytes(body, filename, source)
+        return parse_inventory_bytes(body, filename, source)
     except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise HTTPException(422, str(error)) from error
-    batch_id = properties.import_properties(
-        result.records,
-        source=result.source,
-        validation_errors=[issue.as_dict() for issue in result.errors],
-    )
+
+
+def _inventory_validation_payload(result: InventoryImportResult) -> dict[str, object]:
     return {
         "accepted": len(result.records),
         "rejected": len(result.errors),
         "source": result.source,
-        "batch_id": batch_id,
         "validation_errors": [issue.as_dict() for issue in result.errors],
+    }
+
+
+@app.post(
+    "/v1/properties/validate-file",
+    dependencies=[Depends(require_admin_api_key)],
+)
+async def validate_inventory_file(request: Request, filename: str, source: str):
+    """Preview a CSV/JSON inventory upload without writing listings or import batches."""
+    result = await _parse_inventory_upload(request, filename, source)
+    return _inventory_validation_payload(result)
+
+
+@app.post(
+    "/v1/properties/import-file", status_code=202, dependencies=[Depends(require_admin_api_key)]
+)
+async def import_inventory_file(request: Request, filename: str, source: str):
+    """Import only a non-empty, fully valid CSV/JSON inventory file."""
+    result = await _parse_inventory_upload(request, filename, source)
+    if result.errors:
+        raise HTTPException(
+            422,
+            detail={
+                "message": "Import blocked: fix every rejected row and validate the file again.",
+                **_inventory_validation_payload(result),
+            },
+        )
+    if not result.records:
+        raise HTTPException(422, "Inventory file contains no property records")
+    batch_id = properties.import_properties(
+        result.records,
+        source=result.source,
+    )
+    return {
+        "accepted": len(result.records),
+        "rejected": 0,
+        "source": result.source,
+        "batch_id": batch_id,
+        "validation_errors": [],
     }
 
 
