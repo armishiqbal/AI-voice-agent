@@ -22,6 +22,6 @@
 ## Evaluation and roadmap
 
 - [RAG evaluation](RAG_EVALUATION.md)
-- [TTS evaluation](TTS_EVALUATION.md), [Fish/ElevenLabs comparison](FISH_ELEVENLABS_COMPARISON.md), [human scoring rubric](HUMAN_VOICE_RUBRIC.md)
+- [TTS evaluation](TTS_EVALUATION.md), [Fish/ElevenLabs comparison](FISH_ELEVENLABS_COMPARISON.md), [human voice acceptance protocol](HUMAN_VOICE_RUBRIC.md), [CSV template](evaluation_templates/native_speaker_voice_acceptance.csv)
 - [Future enhancements](FUTURE_ENHANCEMENTS.md)
 - [Original implementation plan](IMPLEMENTATION_PLAN.md): historical planning context; the current requirement audit and release gates control acceptance.
