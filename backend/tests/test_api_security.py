@@ -2029,6 +2029,91 @@ def test_stt_stream_drop_recovers_on_next_live_audio_frame(monkeypatch):
         assert len(calls) == 2
 
 
+def test_hybrid_voice_retries_a_quick_deepgram_startup_timeout(monkeypatch) -> None:
+    import app.api.app as api
+    from app.integrations.stt.deepgram import DeepgramStreamingSTT, STTProviderError
+
+    class FlakyDeepgramSTT(DeepgramStreamingSTT):
+        def __init__(self) -> None:
+            super().__init__(api_key="test-key")
+            self.attempts = 0
+
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise STTProviderError("temporary connect timeout", code="provider_timeout")
+            if self.on_transport_ready is not None:
+                self.on_transport_ready()
+            async for _frame in audio:
+                pass
+            if False:
+                yield STTEvent()
+
+    provider = FlakyDeepgramSTT()
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda _config: provider)
+    issued = api.voice_sessions.issue(
+        "testclient", "http://localhost:5173", "hybrid"
+    )
+    assert issued is not None
+
+    with TestClient(app) as client, client.websocket_connect(
+        "/v1/voice", headers={"origin": "http://localhost:5173"}
+    ) as websocket:
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        events = []
+        while not any(event.get("audio_started") is True for event in events):
+            events.append(_receive_json_timeout(websocket))
+
+    assert provider.attempts == 2
+    assert not any(event.get("type") == "stt_unavailable" for event in events)
+
+
+def test_hybrid_voice_does_not_retry_a_permanent_deepgram_startup_failure(
+    monkeypatch,
+) -> None:
+    import app.api.app as api
+    from app.integrations.stt.deepgram import DeepgramStreamingSTT, STTProviderError
+
+    class RejectedDeepgramSTT(DeepgramStreamingSTT):
+        def __init__(self) -> None:
+            super().__init__(api_key="test-key")
+            self.attempts = 0
+
+        async def is_ready(self) -> bool:
+            return True
+
+        async def stream(self, audio):
+            del audio
+            self.attempts += 1
+            raise STTProviderError("credentials rejected", code="provider_auth_rejected")
+            yield STTEvent()  # pragma: no cover
+
+    provider = RejectedDeepgramSTT()
+    monkeypatch.setattr(api, "build_urdu_hybrid_stt", lambda _config: provider)
+    issued = api.voice_sessions.issue(
+        "testclient", "http://localhost:5173", "hybrid"
+    )
+    assert issued is not None
+
+    with TestClient(app) as client, client.websocket_connect(
+        "/v1/voice", headers={"origin": "http://localhost:5173"}
+    ) as websocket:
+        _authenticate_voice_socket(websocket, issued[0])
+        websocket.send_json({"type": "audio_start", "sample_rate": 16_000})
+        events = []
+        while not any(event.get("type") == "stt_unavailable" for event in events):
+            events.append(_receive_json_timeout(websocket))
+
+    assert provider.attempts == 1
+    assert next(event for event in events if event.get("type") == "stt_unavailable")[
+        "reason"
+    ] == "stt_provider_auth_rejected"
+
+
 @pytest.mark.parametrize(
     ("provider_message", "expected_reason", "expected_recoverable"),
     (

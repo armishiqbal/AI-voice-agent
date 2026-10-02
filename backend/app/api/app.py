@@ -924,6 +924,7 @@ async def voice_socket(websocket: WebSocket):
     stt_transport_ready = asyncio.Event()
     stt_transport_failed = asyncio.Event()
     stt_transport_failure_reason = "stt_provider_unavailable"
+    stt_startup_in_progress = False
     session_stt = (
         build_openai_realtime_stt(settings)
         if voice_mode == "openai"
@@ -1866,6 +1867,7 @@ async def voice_socket(websocket: WebSocket):
                 and not completed_stream_turn
                 and not recovery_delivered
                 and not superseded_by_new_stream
+                and not stt_startup_in_progress
             )
             if should_report_failure and not asyncio.current_task().cancelling():
                 stt_turn_active = False
@@ -1878,55 +1880,91 @@ async def voice_socket(websocket: WebSocket):
     async def start_stt_stream() -> bool:
         """Open an STT stream and wait for the Deepgram socket handshake."""
         nonlocal audio_queue, stt_task, audio_started_at, stt_transport_failure_reason
+        nonlocal stt_startup_in_progress
         if stt_task is not None and not stt_task.done() and audio_queue is not None:
             return not isinstance(session_stt, DeepgramStreamingSTT) or stt_transport_ready.is_set()
 
-        stt_transport_ready.clear()
-        stt_transport_failed.clear()
-        stt_transport_failure_reason = "stt_provider_unavailable"
-        queue: asyncio.Queue[bytes | None] = asyncio.Queue(
-            maxsize=settings.voice_audio_queue_frames
-        )
-        audio_queue = queue
-        audio_started_at = time.perf_counter()
-        started_at = time.perf_counter()
-        task = asyncio.create_task(consume_stt(queue))
-        stt_task = task
-
         if not isinstance(session_stt, DeepgramStreamingSTT):
+            queue: asyncio.Queue[bytes | None] = asyncio.Queue(
+                maxsize=settings.voice_audio_queue_frames
+            )
+            audio_queue = queue
+            audio_started_at = time.perf_counter()
+            stt_task = asyncio.create_task(consume_stt(queue))
             return True
 
-        ready_waiter = asyncio.create_task(stt_transport_ready.wait())
-        failed_waiter = asyncio.create_task(stt_transport_failed.wait())
-        try:
-            await asyncio.wait(
-                (ready_waiter, failed_waiter),
-                timeout=settings.stt_transport_timeout_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
+        started_at = time.perf_counter()
+        deadline = started_at + settings.stt_transport_timeout_seconds
+        max_attempts = 2
+        stt_startup_in_progress = True
+        for attempt in range(max_attempts):
+            attempt_started_at = time.perf_counter()
+            stt_transport_ready.clear()
+            stt_transport_failed.clear()
+            stt_transport_failure_reason = "stt_provider_unavailable"
+            queue: asyncio.Queue[bytes | None] = asyncio.Queue(
+                maxsize=settings.voice_audio_queue_frames
             )
-        finally:
-            for waiter in (ready_waiter, failed_waiter):
-                if not waiter.done():
-                    waiter.cancel()
-            await asyncio.gather(ready_waiter, failed_waiter, return_exceptions=True)
+            audio_queue = queue
+            audio_started_at = time.perf_counter()
+            task = asyncio.create_task(consume_stt(queue))
+            stt_task = task
 
-        if stt_transport_ready.is_set():
-            traces.observe(
-                "voice.stt_transport_warmup_ms", (time.perf_counter() - started_at) * 1000
-            )
-            traces.increment("voice:stt_transport_ready")
-            return True
+            ready_waiter = asyncio.create_task(stt_transport_ready.wait())
+            failed_waiter = asyncio.create_task(stt_transport_failed.wait())
+            try:
+                await asyncio.wait(
+                    (ready_waiter, failed_waiter),
+                    timeout=max(0.0, deadline - time.perf_counter()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for waiter in (ready_waiter, failed_waiter):
+                    if not waiter.done():
+                        waiter.cancel()
+                await asyncio.gather(ready_waiter, failed_waiter, return_exceptions=True)
 
-        if not stt_transport_failed.is_set():
-            stt_transport_failure_reason = "stt_provider_timeout"
-            traces.increment("voice:stt_transport_warmup_timeout")
-        else:
-            traces.increment("voice:stt_transport_warmup_failed")
-        if audio_queue is queue:
-            audio_queue = None
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+            attempt_ms = (time.perf_counter() - attempt_started_at) * 1000
+            if stt_transport_ready.is_set():
+                stt_startup_in_progress = False
+                traces.observe(
+                    "voice.stt_transport_warmup_ms",
+                    (time.perf_counter() - started_at) * 1000,
+                )
+                traces.observe("voice.stt_transport_attempt_ms", attempt_ms)
+                traces.increment("voice:stt_transport_ready")
+                return True
+
+            timed_out = not stt_transport_failed.is_set()
+            if timed_out:
+                stt_transport_failure_reason = "stt_provider_timeout"
+                traces.increment("voice:stt_transport_warmup_timeout")
+            else:
+                traces.increment("voice:stt_transport_warmup_failed")
+            traces.observe("voice.stt_transport_attempt_ms", attempt_ms)
+
+            if audio_queue is queue:
+                audio_queue = None
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+            # Retry one quickly rejected Deepgram connection within the original
+            # startup deadline. A socket that hangs or a permanent provider error
+            # must not extend microphone startup or be retried.
+            if (
+                attempt == 0
+                and not timed_out
+                and stt_transport_failure_reason == "stt_provider_timeout"
+                and time.perf_counter() < deadline
+            ):
+                traces.increment("voice:stt_transport_retry")
+                await asyncio.sleep(min(0.05, max(0.0, deadline - time.perf_counter())))
+                continue
+            stt_startup_in_progress = False
+            return False
+
+        stt_startup_in_progress = False
         return False
 
     try:
