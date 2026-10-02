@@ -20,7 +20,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $json.body;\nif (!body || !/^[a-f0-9]{64}$/.test(body.event_id || '') || !body.event) throw new Error('Invalid event envelope');\nconst allowed = ['appointment.booked', 'appointment.rescheduled', 'appointment.cancelled', 'lead.created', 'voice.call_completed'];\nif (!allowed.includes(body.event.event_type)) throw new Error('Unsupported event');\nif (body.event.event_type.startsWith('appointment.')) {\n  const receipts = Object.values(body.upstream_deliveries || {});\n  if (!receipts.some(x => x && x.provider === 'google_calendar')) throw new Error('Calendar delivery not confirmed');\n  if (!receipts.some(x => x && x.provider === 'gmail')) throw new Error('Employee email delivery not confirmed');\n}\nreturn [{json: body}];"
+        "jsCode": "const body = $json.body;\nif (!body || !/^[a-f0-9]{64}$/.test(body.event_id || '') || !body.event) throw new Error('Invalid event envelope');\nconst allowed = ['appointment.booked', 'appointment.rescheduled', 'appointment.cancelled', 'lead.created', 'lead.follow_up_due', 'voice.call_completed'];\nif (!allowed.includes(body.event.event_type)) throw new Error('Unsupported event');\nif (body.event.event_type.startsWith('appointment.')) {\n  const receipts = Object.values(body.upstream_deliveries || {});\n  if (!receipts.some(x => x && x.provider === 'google_calendar')) throw new Error('Calendar delivery not confirmed');\n  if (!receipts.some(x => x && x.provider === 'gmail')) throw new Error('Employee email delivery not confirmed');\n}\nreturn [{json: body}];"
       },
       "id": "validate",
       "name": "Validate Calendar and Email Receipts",

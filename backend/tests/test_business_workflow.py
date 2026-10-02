@@ -168,6 +168,7 @@ def test_n8n_export_has_auth_and_requires_completed_crm():
     assert webhook["parameters"]["responseMode"] == "responseNode"
     assert "Calendar delivery not confirmed" in validate["parameters"]["jsCode"]
     assert "Employee email delivery not confirmed" in validate["parameters"]["jsCode"]
+    assert "'lead.follow_up_due'" in validate["parameters"]["jsCode"]
     assert crm["retryOnFail"] is True and crm["maxTries"] == 3
     assert crm["parameters"]["url"] == "={{ $env.AWAAZ_CRM_WEBHOOK_URL }}"
     headers = crm["parameters"]["headerParameters"]["parameters"]
