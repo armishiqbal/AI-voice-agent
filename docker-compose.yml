@@ -50,6 +50,7 @@ services:
     ports: ["127.0.0.1:5678:5678"]
     environment:
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-}
+      AWAAZ_CRM_WEBHOOK_URL: ${AWAAZ_CRM_WEBHOOK_URL:-}
       GENERIC_TIMEZONE: Asia/Karachi
       TZ: Asia/Karachi
     volumes:

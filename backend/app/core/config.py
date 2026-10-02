@@ -106,7 +106,7 @@ class Settings(BaseSettings):
             raise ValueError("N8N_WEBHOOK_URL and N8N_WEBHOOK_TOKEN must be configured together")
         if self.n8n_webhook_url:
             parsed_n8n = urlparse(self.n8n_webhook_url)
-            local_n8n = parsed_n8n.hostname in {"127.0.0.1", "localhost", "::1"}
+            local_n8n = parsed_n8n.hostname in {"127.0.0.1", "localhost", "::1", "n8n"}
             if (not parsed_n8n.hostname or parsed_n8n.username or parsed_n8n.password
                 or parsed_n8n.fragment or parsed_n8n.query
                 or (parsed_n8n.scheme != "https" and not (

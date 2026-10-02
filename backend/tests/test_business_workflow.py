@@ -31,6 +31,13 @@ def test_n8n_configuration_requires_https_and_paired_token():
         n8n_webhook_token="secret",
         google_token_path=None,
     )
+    compose_settings = Settings(
+        app_env="development",
+        n8n_webhook_url="http://n8n:5678/webhook/awaaz-crm-events",
+        n8n_webhook_token="secret",
+        google_token_path=None,
+    )
+    assert compose_settings.n8n_webhook_url == "http://n8n:5678/webhook/awaaz-crm-events"
     assert set(build_outbox_handlers(settings)) == {
         "lead.created",
         "lead.follow_up_due",
@@ -168,7 +175,15 @@ def test_n8n_export_has_auth_and_requires_completed_crm():
     assert webhook["parameters"]["responseMode"] == "responseNode"
     assert "Calendar delivery not confirmed" in validate["parameters"]["jsCode"]
     assert "Employee email delivery not confirmed" in validate["parameters"]["jsCode"]
-    assert "'lead.follow_up_due'" in validate["parameters"]["jsCode"]
+    for event_type in (
+        "appointment.booked",
+        "appointment.rescheduled",
+        "appointment.cancelled",
+        "lead.created",
+        "lead.follow_up_due",
+        "voice.call_completed",
+    ):
+        assert f"'{event_type}'" in validate["parameters"]["jsCode"]
     assert crm["retryOnFail"] is True and crm["maxTries"] == 3
     assert crm["parameters"]["url"] == "={{ $env.AWAAZ_CRM_WEBHOOK_URL }}"
     headers = crm["parameters"]["headerParameters"]["parameters"]
