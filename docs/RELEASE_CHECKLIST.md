@@ -32,7 +32,13 @@ their fixture label; source-ID correctness is narrower than full factual claim c
 The live voice evaluator writes its diagnostic artifact even when the acceptance gates fail; its
 exit code is non-zero unless every turn has a final transcript, final audio, and substantive audio
 within the configured two-second target. Acknowledgement audio does not satisfy the substantive
-answer gate. The run still labels synthetic input and does not establish physical audibility or p95.
+answer gate. Use `--runs 7` (maximum 20) to collect 21 turns across independent sessions; the
+artifact reports stage-specific p50/p95 values, sample counts, and whether each percentile has at
+least 20 samples.
+This synthetic loopback still does not establish physical audibility, native-speaker quality, or a
+representative production p95. The default remains one three-turn session. Every run calls the
+configured live STT, agent, and TTS providers; choosing OpenAI-generated input also synthesizes all
+three caller phrases for every run.
 
 | Gate | Required evidence |
 |---|---|

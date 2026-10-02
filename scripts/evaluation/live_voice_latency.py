@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import base64
 import json
+import math
 import struct
 import subprocess
 import sys
@@ -39,6 +40,7 @@ FRAME_SAMPLES_16K = round(16_000 * 4096 / 48_000)
 FRAME_SECONDS = 4096 / 48_000
 SILENCE_FRAMES = 5  # 426.7 ms, just over the browser's 425 ms VAD threshold.
 MACOS_SAY_TIMEOUT_SECONDS = 20
+MAX_RUNS = 20
 PHRASES = (
     "Mujhe Karachi mein ghar chahiye, mera budget paanch crore hai.",
     "Rent par lena hai.",
@@ -339,7 +341,7 @@ async def run_turn(websocket: Any, phrase: str, audio: bytes, number: int) -> di
     raise LiveVoiceTurnFailure(message, partial_turn(message))
 
 
-async def run(
+async def _run_once(
     base_url: str,
     voice_mode: str = "openai",
     input_source: str = "macos-say",
@@ -441,6 +443,208 @@ async def run(
     return result
 
 
+LATENCY_FIELDS = (
+    "last_voice_to_final_transcript_ms",
+    "agent_decision_latency_ms",
+    "final_transcript_to_substantive_audio_ms",
+    "last_voice_to_substantive_audio_ms",
+    "response_complete_ms",
+)
+
+
+def summarize_latency(
+    turns: list[dict[str, Any]],
+) -> dict[str, dict[str, float | int | bool]]:
+    """Summarize measured stages and make small-sample percentiles explicit."""
+
+    summary: dict[str, dict[str, float | int | bool]] = {}
+    for field in LATENCY_FIELDS:
+        values = sorted(
+            float(value)
+            for turn in turns
+            if isinstance((value := turn.get(field)), (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        )
+        if not values:
+            summary[field] = {
+                "sample_count": 0,
+                "p50": 0.0,
+                "p95": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+                "p95_sample_eligible": False,
+            }
+            continue
+
+        def nearest_rank(fraction: float) -> float:
+            index = max(0, math.ceil(len(values) * fraction) - 1)
+            return round(values[index], 1)
+
+        summary[field] = {
+            "sample_count": len(values),
+            "p50": nearest_rank(0.50),
+            "p95": nearest_rank(0.95),
+            "min": round(values[0], 1),
+            "max": round(values[-1], 1),
+            "p95_sample_eligible": len(values) >= 20,
+        }
+    return summary
+
+
+async def run(
+    base_url: str,
+    voice_mode: str = "openai",
+    input_source: str = "macos-say",
+    runs: int = 1,
+) -> dict[str, Any]:
+    """Run independent voice sessions and retain a stage-by-stage sample summary."""
+
+    if isinstance(runs, bool) or not isinstance(runs, int) or not 1 <= runs <= MAX_RUNS:
+        raise ValueError(f"runs must be an integer between 1 and {MAX_RUNS}")
+
+    sessions: list[dict[str, Any]] = []
+    turns: list[dict[str, Any]] = []
+    for run_number in range(1, runs + 1):
+        try:
+            session = await _run_once(base_url, voice_mode, input_source)
+        except Exception as error:  # noqa: BLE001 - keep evidence for each requested session
+            partial_turns = getattr(error, "turns", [])
+            completed_turn_count = len(partial_turns) if isinstance(partial_turns, list) else 0
+            failed_turn = getattr(error, "failed_turn", None)
+            if not isinstance(partial_turns, list):
+                partial_turns = []
+            if isinstance(failed_turn, dict):
+                partial_turns = [*partial_turns, failed_turn]
+            for turn in partial_turns:
+                if isinstance(turn, dict):
+                    turns.append({**turn, "run": run_number})
+            sessions.append(
+                {
+                    "run": run_number,
+                    "status": "failed",
+                    "failure": f"{type(error).__name__}: {error}"[:500],
+                    "completed_turn_count": completed_turn_count,
+                    "observed_turn_count": len(partial_turns),
+                }
+            )
+            continue
+
+        session_turns = session.get("turns", [])
+        if not isinstance(session_turns, list):
+            session_turns = []
+        tagged_turns = [
+            {**turn, "run": run_number}
+            for turn in session_turns
+            if isinstance(turn, dict)
+        ]
+        turns.extend(tagged_turns)
+        sessions.append(
+            {
+                "run": run_number,
+                "status": session.get("status", "unknown"),
+                "acceptance_status": session.get("acceptance_status", "failed"),
+                "acceptance_failures": session.get("acceptance_failures", []),
+                "completed_turn_count": len(tagged_turns),
+                "observed_turn_count": len(tagged_turns),
+            }
+        )
+
+    expected_turns = runs * len(PHRASES)
+    completed_runs = sum(session.get("status") == "completed" for session in sessions)
+    acceptance_failures = sorted(
+        {
+            failure
+            for session in sessions
+            for failure in session.get("acceptance_failures", [])
+            if isinstance(failure, str)
+        }
+    )
+    if completed_runs != runs or len(turns) != expected_turns:
+        acceptance_failures.append("run_incomplete")
+    if any(session.get("status") == "failed" for session in sessions):
+        acceptance_failures.append("session_failed")
+    acceptance_failures = sorted(set(acceptance_failures))
+    if completed_runs == runs:
+        status = "completed"
+    elif completed_runs:
+        status = "partial"
+    else:
+        status = "failed"
+    all_audio = all(
+        turn.get("final_audio_received") is True
+        and isinstance(turn.get("audio_bytes"), int)
+        and not isinstance(turn.get("audio_bytes"), bool)
+        and turn["audio_bytes"] > 0
+        for turn in turns
+    ) and len(turns) == expected_turns
+    all_answered = all(
+        turn.get("final_transcript_received") is True
+        and turn.get("transcription_recovery") is False
+        for turn in turns
+    ) and len(turns) == expected_turns
+    all_first_audio_under_target = all(
+        isinstance(turn.get("last_voice_to_first_audio_ms"), (int, float))
+        and not isinstance(turn.get("last_voice_to_first_audio_ms"), bool)
+        and 0 <= turn["last_voice_to_first_audio_ms"] < 2_000
+        for turn in turns
+    ) and len(turns) == expected_turns
+    all_answers_under_target = all(
+        turn.get("transcription_recovery") is False
+        and isinstance(turn.get("last_voice_to_substantive_audio_ms"), (int, float))
+        and not isinstance(turn.get("last_voice_to_substantive_audio_ms"), bool)
+        and 0 <= turn["last_voice_to_substantive_audio_ms"] < 2_000
+        for turn in turns
+    ) and len(turns) == expected_turns
+
+    return {
+        "status": status,
+        "voice_mode": voice_mode,
+        "input_source": input_source,
+        "method": (
+            "Independent live local FastAPI/WebSocket sessions with synthetic PCM speech paced "
+            "at the browser AudioWorklet cadence (4096 samples at 48 kHz, mono 16 kHz input). "
+            "Five silence frames model the 425 ms browser VAD threshold."
+        ),
+        "capture_frame_ms": round(FRAME_SECONDS * 1000, 3),
+        "silence_frames": SILENCE_FRAMES,
+        "silence_ms": round(SILENCE_FRAMES * FRAME_SECONDS * 1000, 1),
+        "target_ms": 2_000,
+        "runs_requested": runs,
+        "runs_completed": completed_runs,
+        "expected_turn_count": expected_turns,
+        "completed_turn_count": sum(
+            session.get("completed_turn_count", 0) for session in sessions
+        ),
+        "observed_turn_count": len(turns),
+        "all_turns_returned_audio": all_audio,
+        "all_turns_answered": all_answered,
+        "transcription_recovery_count": sum(
+            turn.get("transcription_recovery") is True for turn in turns
+        ),
+        "all_first_audio_under_target": all_first_audio_under_target,
+        "all_substantive_answers_under_target": all_answers_under_target,
+        "sessions": sessions,
+        "turns": turns,
+        "latency_summary_ms": summarize_latency(turns),
+        "acceptance_status": "passed" if not acceptance_failures else "failed",
+        "acceptance_failures": acceptance_failures,
+        "limitations": [
+            "Synthetic speech, not a physical microphone or human quality review",
+            "Local WebSocket loopback excludes browser playback/audio-device audibility",
+            (
+                "A stage p95 is marked sample-eligible only with at least 20 measured turns; "
+                "that is not a substitute for a representative production sample"
+            ),
+            (
+                "Every run calls the configured live STT, agent, and TTS providers; OpenAI-generated "
+                "input additionally synthesizes all three caller phrases per run"
+            ),
+        ],
+    }
+
+
 def write_artifact(path: Path, result: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
@@ -456,7 +660,19 @@ def main() -> None:
         "--input-source",
         choices=("macos-say", "openai-realtime"),
         default="macos-say",
-        help="Generate synthetic caller speech locally or spend OpenAI credits to synthesize it",
+        help=(
+            "Generate synthetic caller speech locally or synthesize it with OpenAI; all modes "
+            "call configured live STT, agent, and TTS providers"
+        ),
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help=(
+            "Independent voice sessions to collect (1–20, default: 1; each has three turns). "
+            "Runs call live providers; OpenAI-generated input adds synthesis usage per run."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -465,7 +681,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        result = asyncio.run(run(args.api_url, args.voice_mode, args.input_source))
+        result = asyncio.run(run(args.api_url, args.voice_mode, args.input_source, args.runs))
         exit_code = 0 if result["acceptance_status"] == "passed" else 1
     except Exception as error:  # noqa: BLE001 - persist failed live evidence before exiting
         turns = getattr(error, "turns", [])

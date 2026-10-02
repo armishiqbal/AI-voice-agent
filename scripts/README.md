@@ -17,6 +17,7 @@ Examples:
 
 ```bash
 python scripts/evaluation/evaluate.py
+python scripts/evaluation/live_voice_latency.py --voice-mode hybrid --runs 7
 python scripts/data/import_inventory.py ./inventory.csv --source crm-export-v1
 python scripts/benchmark/benchmark_tts.py
 ```

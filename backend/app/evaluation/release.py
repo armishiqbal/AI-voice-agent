@@ -54,16 +54,36 @@ def load_synthetic_voice_smoke(root: Path) -> dict[str, object]:
             "scope": "synthetic WebSocket loopback",
             "observed_at_utc": observed_at.isoformat(),
         }
-    if result.get("status") == "failed":
+    if result.get("status") in {"failed", "partial"}:
         turns = result.get("turns")
-        completed_turn_count = (
-            len(turns)
-            if isinstance(turns, list) and all(isinstance(turn, dict) for turn in turns)
-            else 0
-        )
+        reported_completed_turn_count = result.get("completed_turn_count")
+        if (
+            isinstance(reported_completed_turn_count, int)
+            and not isinstance(reported_completed_turn_count, bool)
+            and reported_completed_turn_count >= 0
+        ):
+            completed_turn_count = reported_completed_turn_count
+        elif isinstance(turns, list) and all(isinstance(turn, dict) for turn in turns):
+            completed_turn_count = len(turns)
+        else:
+            completed_turn_count = 0
         failure = result.get("failure")
+        if not failure and isinstance(result.get("sessions"), list):
+            failed_sessions = [
+                session
+                for session in result["sessions"]
+                if isinstance(session, dict) and session.get("status") == "failed"
+            ]
+            failure = "; ".join(
+                str(session.get("failure") or "session failed")[:200]
+                for session in failed_sessions
+            )
         return {
-            "status": "failed synthetic voice loop",
+            "status": (
+                "incomplete synthetic voice loop"
+                if result.get("status") == "partial"
+                else "failed synthetic voice loop"
+            ),
             "scope": "synthetic UrduLish audio over authenticated local WebSocket; excludes physical mic and playback",
             "voice_mode": "hybrid",
             "completed_turn_count": completed_turn_count,
