@@ -174,6 +174,25 @@ def test_failed_synthetic_voice_smoke_invalidates_previous_success(tmp_path: Pat
     assert "provider unavailable" in smoke["failure"]
 
 
+def test_partial_synthetic_voice_smoke_is_not_reported_as_passed(tmp_path: Path) -> None:
+    path = tmp_path / "artifacts" / "evaluation" / "live-voice-latency-hybrid-current.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "status": "partial",
+        "voice_mode": "hybrid",
+        "completed_turn_count": 3,
+        "observed_turn_count": 4,
+        "turns": [{"final_audio_received": True} for _ in range(4)],
+        "sessions": [{"status": "failed", "failure": "provider timeout"}],
+    }))
+
+    smoke = release.load_synthetic_voice_smoke(tmp_path)
+
+    assert smoke["status"] == "incomplete synthetic voice loop"
+    assert smoke["completed_turn_count"] == 3
+    assert smoke["failure"] == "provider timeout"
+
+
 def test_stale_synthetic_voice_smoke_is_not_counted_as_current(tmp_path: Path) -> None:
     path = tmp_path / "artifacts" / "evaluation" / "live-voice-latency-hybrid-current.json"
     path.parent.mkdir(parents=True)

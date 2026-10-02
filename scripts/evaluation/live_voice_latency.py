@@ -452,6 +452,11 @@ LATENCY_FIELDS = (
 )
 
 
+def nearest_rank(values: list[float], fraction: float) -> float:
+    index = max(0, math.ceil(len(values) * fraction) - 1)
+    return round(values[index], 1)
+
+
 def summarize_latency(
     turns: list[dict[str, Any]],
 ) -> dict[str, dict[str, float | int | bool]]:
@@ -478,14 +483,10 @@ def summarize_latency(
             }
             continue
 
-        def nearest_rank(fraction: float) -> float:
-            index = max(0, math.ceil(len(values) * fraction) - 1)
-            return round(values[index], 1)
-
         summary[field] = {
             "sample_count": len(values),
-            "p50": nearest_rank(0.50),
-            "p95": nearest_rank(0.95),
+            "p50": nearest_rank(values, 0.50),
+            "p95": nearest_rank(values, 0.95),
             "min": round(values[0], 1),
             "max": round(values[-1], 1),
             "p95_sample_eligible": len(values) >= 20,
