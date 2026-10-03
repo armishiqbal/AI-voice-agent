@@ -5,6 +5,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from listing_fixtures import import_publishable_demo_properties
 from sqlalchemy import select
 
 from app.domain.fixtures import demo_properties
@@ -16,6 +17,7 @@ from app.repositories.properties import SqlPropertyRepository
 from app.repositories.records import (
     AppointmentRecord,
     OutboxEventRecord,
+    PropertyRecord,
     ToolAuditEventRecord,
     VoiceSessionLeaseRecord,
     VoiceSessionRateLimitRecord,
@@ -47,7 +49,7 @@ def test_database_schema_contains_core_records() -> None:
 def test_sql_property_repository_imports_and_filters() -> None:
     create_schema_for_local_development()
     repository = SqlPropertyRepository()
-    repository.import_properties(demo_properties())
+    import_publishable_demo_properties(repository)
     assert repository.get_available("PROP-001") is not None
     assert all(item.city == "Karachi" for item in repository.list()) is False
     Base.metadata.drop_all(bind=engine)
@@ -61,8 +63,10 @@ def test_property_import_persists_source_and_timestamp() -> None:
         source="crm-export-v1",
         validation_errors=[{"row": 4, "field": "price_pkr", "message": "invalid"}],
     )
-    item = repository.list()[0]
+    with SessionLocal() as session:
+        item = session.get(PropertyRecord, "PROP-001")
     assert batch_id
+    assert item is not None
     assert item.source == "crm-export-v1"
     assert item.imported_at is not None
     Base.metadata.drop_all(bind=engine)
@@ -71,7 +75,7 @@ def test_property_import_persists_source_and_timestamp() -> None:
 def test_sql_appointment_is_idempotent_and_writes_outbox() -> None:
     create_schema_for_local_development()
     properties = SqlPropertyRepository()
-    properties.import_properties(demo_properties())
+    import_publishable_demo_properties(properties)
     service = SqlAppointmentService(properties)
     request = AppointmentRequest(
         property_id="PROP-001",
@@ -115,7 +119,7 @@ def test_sql_appointment_is_idempotent_and_writes_outbox() -> None:
 def test_sql_appointment_rejects_wrong_employee_and_busy_slot() -> None:
     create_schema_for_local_development()
     properties = SqlPropertyRepository()
-    properties.import_properties(demo_properties())
+    import_publishable_demo_properties(properties)
     service = SqlAppointmentService(properties)
     starts_at = _future_pk_slot()
     with pytest.raises(ValueError, match="assigned"):
@@ -159,7 +163,7 @@ def test_sql_appointment_rejects_wrong_employee_and_busy_slot() -> None:
 def test_sql_update_idempotency_does_not_duplicate_outbox_event() -> None:
     create_schema_for_local_development()
     properties = SqlPropertyRepository()
-    properties.import_properties(demo_properties())
+    import_publishable_demo_properties(properties)
     service = SqlAppointmentService(properties)
     appointment = service.book(
         AppointmentRequest(
@@ -189,7 +193,7 @@ def test_sql_update_idempotency_does_not_duplicate_outbox_event() -> None:
 def test_sql_reschedule_validates_slot_and_persists_transition() -> None:
     create_schema_for_local_development()
     properties = SqlPropertyRepository()
-    properties.import_properties(demo_properties())
+    import_publishable_demo_properties(properties)
     service = SqlAppointmentService(properties)
     appointment = service.book(
         AppointmentRequest(
@@ -219,7 +223,7 @@ def test_sql_reschedule_validates_slot_and_persists_transition() -> None:
 def test_postgres_concurrent_bookings_cannot_claim_same_employee_slot() -> None:
     create_schema_for_local_development()
     importer = SqlPropertyRepository()
-    importer.import_properties(demo_properties())
+    import_publishable_demo_properties(importer)
 
     barrier = Barrier(2)
     thread_state = local()

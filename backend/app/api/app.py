@@ -27,12 +27,16 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select, text
 
 from app.agents.graph import EstateAgent
+from app.catalog.inquiries import public_router as public_inquiries_router
+from app.catalog.inquiries import staff_router as staff_inquiries_router
+from app.catalog.public import router as public_catalog_router
+from app.catalog.staff import router as staff_catalog_router
 from app.core.config import settings
 from app.core.observability import TraceStore
 from app.domain.emotions import infer_acoustic_emotion
@@ -42,6 +46,7 @@ from app.domain.models import (
     AppointmentUpdate,
     ConversationTurn,
     LeadCreate,
+    Property,
     PropertyImport,
     PropertyQuery,
     TelephonyCallRequest,
@@ -172,6 +177,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(public_catalog_router)
+app.include_router(public_inquiries_router)
+app.include_router(staff_inquiries_router)
+app.include_router(staff_catalog_router)
+
+
+class VoicePropertySummary(BaseModel):
+    """Small public projection used by the retained voice browser client."""
+
+    id: str
+    title: str
+    city: str
+    area: str
+    purpose: Literal["sale", "rent", "commercial", "investment"]
+    price_pkr: int
+    bedrooms: int
+    size_sqft: int
+    amenities: list[str]
+    investment_goals: list[str]
+    nearby_schools: list[str]
+    nearby_hospitals: list[str]
+    developer: str
+    payment_plan: str
+    available: bool
+
+
+def _voice_property_summary(value: Property) -> VoicePropertySummary:
+    return VoicePropertySummary(
+        id=value.id,
+        title=value.title,
+        city=value.city,
+        area=value.area,
+        purpose=value.purpose,
+        price_pkr=value.price_pkr,
+        bedrooms=value.bedrooms,
+        size_sqft=value.size_sqft,
+        amenities=value.amenities,
+        investment_goals=value.investment_goals,
+        nearby_schools=value.nearby_schools,
+        nearby_hospitals=value.nearby_hospitals,
+        developer=value.developer,
+        payment_plan=value.payment_plan,
+        available=value.available,
+    )
 
 
 def _voice_tts_failure_code(error: TTSProviderError) -> str:
@@ -218,6 +267,11 @@ if not frontend_dist.exists():
 
 if (frontend_dist / "assets").exists():
     app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
+    app.mount(
+        "/assistant/assets",
+        StaticFiles(directory=frontend_dist / "assets"),
+        name="assistant-assets",
+    )
 
 SUPPORTED_VOICE_LANGUAGES = {"ur-Latn", "ur-Arab", "en", "hi", "ar", "pa", "bn"}
 OPENAI_STT_READINESS_CACHE_TTL_SECONDS = 30.0
@@ -256,6 +310,14 @@ async def live_openai_stt_ready() -> bool:
 
 
 async def voice_option_readiness() -> dict[str, bool]:
+    if not settings.voice_enabled:
+        return {
+            "standard_voice_ready": False,
+            "openai_voice_ready": False,
+            "hybrid_voice_ready": False,
+            "multilingual_tts": False,
+            "live_voice_pipeline_ready": False,
+        }
     provider_status = provider_readiness()
     deepgram_stt_ready = await stt.is_ready()
     standard_tts_ready = provider_status.multilingual_tts and await all_tts_languages_ready(tts)
@@ -359,6 +421,22 @@ def root(request: Request) -> Response:
             "ready": "/readyz",
             "health": "/healthz",
         }
+    )
+
+
+@app.get("/assistant", include_in_schema=False)
+def assistant_redirect() -> Response:
+    return RedirectResponse(url="/assistant/", status_code=307)
+
+
+@app.get("/assistant/", include_in_schema=False)
+def assistant(request: Request) -> Response:
+    """Serve the existing Vite voice experience under its stable website path."""
+    index_file = frontend_dist / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return JSONResponse(
+        {"detail": "Voice application assets have not been built"}, status_code=503
     )
 
 
@@ -588,7 +666,7 @@ def audit_events(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str
         ]
 
 
-@app.get("/v1/properties")
+@app.get("/v1/properties", response_model=list[VoicePropertySummary])
 def list_properties(
     city: str | None = None,
     purpose: str | None = None,
@@ -601,24 +679,27 @@ def list_properties(
         raise HTTPException(status_code=422, detail="At most ten amenities may be requested")
     if investment_goal and len(investment_goal) > 100:
         raise HTTPException(status_code=422, detail="Investment goal is too long")
-    return properties.list(
-        PropertyQuery(
-            city=city,
-            purpose=purpose,
-            max_budget_pkr=max_budget_pkr,
-            bedrooms=bedrooms,
-            amenities=amenities or [],
-            investment_goal=investment_goal,
+    return [
+        _voice_property_summary(item)
+        for item in properties.list(
+            PropertyQuery(
+                city=city,
+                purpose=purpose,
+                max_budget_pkr=max_budget_pkr,
+                bedrooms=bedrooms,
+                amenities=amenities or [],
+                investment_goal=investment_goal,
+            )
         )
-    )
+    ]
 
 
-@app.get("/v1/properties/{property_id}")
+@app.get("/v1/properties/{property_id}", response_model=VoicePropertySummary)
 def get_property(property_id: str):
     property_item = properties.get_available(property_id)
     if property_item is None:
         raise HTTPException(404, "Verified available property was not found")
-    return property_item
+    return _voice_property_summary(property_item)
 
 
 @app.post("/v1/properties/import", status_code=202, dependencies=[Depends(require_admin_api_key)])
@@ -799,6 +880,8 @@ async def telephony_inbound(request: Request) -> Response:
 
 @app.post("/v1/conversations/{conversation_id}/turn")
 def conversation_turn(conversation_id: str, turn: ConversationTurn):
+    if not settings.voice_enabled:
+        raise HTTPException(status_code=503, detail="Voice conversations are disabled")
     if agent.decision_provider is None:
         raise HTTPException(status_code=503, detail="Live AI provider is not configured")
     started = time.perf_counter()
@@ -850,6 +933,8 @@ async def create_voice_session(
     response: Response,
     payload: Annotated[VoiceSessionRequest, Body()] = DEFAULT_VOICE_SESSION_REQUEST,
 ) -> dict[str, str]:
+    if not settings.voice_enabled:
+        raise HTTPException(status_code=503, detail="Voice conversations are disabled")
     mode = payload.mode
     origin = request.headers.get("origin")
     if not origin or not voice_origin_allowed(origin, settings.app_env, settings.cors_origins):

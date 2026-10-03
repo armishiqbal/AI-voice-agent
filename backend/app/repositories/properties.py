@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.domain.models import Property, PropertyQuery
 from app.repositories.database import SessionLocal
+from app.repositories.listing_visibility import viewing_eligibility_conditions
 from app.repositories.records import PropertyImportBatchRecord, PropertyRecord
 
 
@@ -39,7 +40,10 @@ class SqlPropertyRepository:
         self.session_factory = session_factory
 
     def list(self, query: PropertyQuery | None = None) -> list[Property]:
-        statement = select(PropertyRecord)
+        # This repository feeds voice recommendations as well as the legacy
+        # property endpoint. Only current, published, photo-approved inventory
+        # can enter that retrieval path.
+        statement = select(PropertyRecord).where(*viewing_eligibility_conditions())
         if query:
             if query.city:
                 statement = statement.where(PropertyRecord.city.ilike(query.city))
@@ -74,7 +78,7 @@ class SqlPropertyRepository:
             record = session.scalar(
                 select(PropertyRecord).where(
                     PropertyRecord.id == property_id,
-                    PropertyRecord.available.is_(True),
+                    *viewing_eligibility_conditions(),
                 )
             )
             return _to_domain(record) if record else None

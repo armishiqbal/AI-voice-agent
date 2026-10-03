@@ -6,6 +6,7 @@ x-runtime: &runtime
   environment:
     DATABASE_URL: postgresql+psycopg://awaaz:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/awaaz
     API_HOST: 0.0.0.0
+    VOICE_ENABLED: ${VOICE_ENABLED:-true}
   volumes:
     - ./secrets:/app/secrets:ro
     - voice-artifacts:/app/artifacts
@@ -36,6 +37,40 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+  website:
+    profiles: [website]
+    build:
+      context: .
+      dockerfile: website/Dockerfile
+    environment:
+      AWAAZ_API_URL: http://api:8000
+      SITE_URL: ${SITE_URL:-http://localhost:8080}
+      ASSISTANT_URL: ${ASSISTANT_URL:-http://localhost:8080/assistant/}
+      CONTACT_EMAIL: ${CONTACT_EMAIL:-}
+      CONTACT_PHONE: ${CONTACT_PHONE:-}
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [CMD, node, -e, "fetch('http://127.0.0.1:3000').then((r) => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+  proxy:
+    profiles: [website]
+    image: ${NGINX_IMAGE:-nginx:stable-alpine}
+    ports: ["127.0.0.1:${WEBSITE_PORT:-8080}:8080"]
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      website:
+        condition: service_healthy
+      api:
+        condition: service_healthy
   worker:
     <<: *runtime
     command: [python, worker.py]

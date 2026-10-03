@@ -1,8 +1,10 @@
-# Awaaz Estate — real-estate voice agent
+# Awaaz Estate — property website and multilingual voice agent
 
-FastAPI + LangGraph + React application for continuous UrduLish property conversations.
-SQL inventory is authoritative; document retrieval adds sourced context. Booking actions use
-validated services and a durable outbox for Calendar, employee email, and n8n integration.
+FastAPI and PostgreSQL remain the business authority for the Awaaz Estate property catalog,
+inquiries, appointments, and the multilingual voice assistant. The public property website is a
+separate Next.js application; the existing Vite voice client remains available at `/assistant/`.
+Booking actions use validated services and a durable outbox for Calendar, employee email, and
+n8n integration.
 
 ## Run locally
 
@@ -16,10 +18,40 @@ npm run build --prefix frontend
 python run.py
 ```
 
-Configure `OPENAI_API_KEY` in the ignored `.env`. Open http://localhost:8000, or run
-`npm run dev --prefix frontend` for http://localhost:5173. `/readyz` reports the configured
-voice routes. A ready provider is not evidence of a completed microphone conversation.
-Run `python worker.py` separately for outbox processing.
+Set `VOICE_ENABLED=true` and configure the required providers in the ignored `.env` to run voice.
+For API and website work without voice credentials, set `VOICE_ENABLED=false`. Open the existing
+assistant at http://localhost:8000/assistant/ or use
+`npm run dev --prefix frontend` for http://localhost:5173. `/readyz` reports configured voice
+routes. A ready provider is not evidence of a completed microphone conversation. Run
+`python worker.py` separately for outbox processing.
+
+## Property website
+
+The Next.js application in `website/` renders public pages on the server and reads listing data
+from FastAPI. To run it alongside the local API:
+
+```bash
+npm ci --prefix website
+AWAAZ_API_URL=http://127.0.0.1:8000 SITE_URL=http://localhost:3000 \
+  ASSISTANT_URL=http://localhost:8000/assistant/ npm run dev --prefix website
+```
+
+Open http://localhost:3000. No real property fixtures are seeded. Imported listings begin as
+drafts; staff must classify the transaction and property type, confirm availability, approve the
+facts and photographs, and publish them before they enter public search or voice recommendations.
+
+For a same-origin local stack, set `POSTGRES_PASSWORD` and the application encryption/admin keys
+in `.env`, then run:
+
+```bash
+VOICE_ENABLED=false docker compose --profile website up --build
+```
+
+Open http://localhost:8080. Set `VOICE_ENABLED=true` only when the production voice providers and
+voice capacity settings are configured. The gateway listens on loopback in this Compose file;
+production TLS, DNS, trusted proxy addresses, approved business contact details, managed auth and
+media credentials, and owner-reviewed inventory still require operator configuration. See
+[website deployment notes](deploy/README.md) and [website acceptance gates](docs/PROPERTY_WEBSITE.md).
 
 No demo inventory is seeded into the runtime. Import authorized company CSV/JSON inventory
 and documents using the authenticated admin endpoints documented in [API](docs/API.md).
@@ -41,7 +73,8 @@ Telephony uses the existing Twilio webhook/media adapter and requires a real num
 ## Container preparation
 
 Set a strong `POSTGRES_PASSWORD` in `.env`, then `docker compose up --build` starts PostgreSQL,
-migrations, API, and worker. Optional n8n: `docker compose --profile automation up --build`.
+migrations, API, and worker. Add `--profile website` to include the Next.js site and same-origin
+Nginx gateway. Optional n8n: `docker compose --profile automation up --build`.
 Pin `N8N_IMAGE` to a reviewed release/digest and set `N8N_ENCRYPTION_KEY` before deployment.
 Google credentials belong in the read-only `secrets/` mount. Deployment is deferred.
 

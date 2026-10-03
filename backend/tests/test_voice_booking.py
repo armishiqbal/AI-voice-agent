@@ -3,8 +3,8 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from listing_fixtures import import_publishable_demo_properties
 
-from app.domain.fixtures import demo_properties
 from app.domain.models import AgentDecision, AppointmentContactContext, AppointmentRequest
 from app.repositories.appointments import SqlAppointmentService
 from app.repositories.bootstrap import create_schema_for_local_development
@@ -17,7 +17,7 @@ def _setup() -> tuple[SqlPropertyRepository, SqlAppointmentService]:
     Base.metadata.drop_all(bind=engine)
     create_schema_for_local_development()
     properties = SqlPropertyRepository()
-    properties.import_properties(demo_properties(), source="demo-fixture")
+    import_publishable_demo_properties(properties)
     return properties, SqlAppointmentService(properties)
 
 

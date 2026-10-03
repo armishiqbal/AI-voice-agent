@@ -1,6 +1,18 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.repositories.database import Base
@@ -13,7 +25,7 @@ class PropertyRecord(Base):
     city: Mapped[str] = mapped_column(String(64), index=True)
     area: Mapped[str] = mapped_column(String(128), index=True)
     purpose: Mapped[str] = mapped_column(String(32), index=True)
-    price_pkr: Mapped[int] = mapped_column(Integer, index=True)
+    price_pkr: Mapped[int] = mapped_column(BigInteger, index=True)
     bedrooms: Mapped[int] = mapped_column(Integer)
     size_sqft: Mapped[int] = mapped_column(Integer)
     amenities: Mapped[list[str]] = mapped_column(JSON)
@@ -24,10 +36,136 @@ class PropertyRecord(Base):
     payment_plan: Mapped[str] = mapped_column(Text)
     available: Mapped[bool] = mapped_column(Boolean, index=True)
     assigned_employee: Mapped[str] = mapped_column(String(128))
+    assigned_staff_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     source_version: Mapped[str] = mapped_column(String(64))
     source: Mapped[str] = mapped_column(String(255), default="unverified")
     imported_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    slug: Mapped[str | None] = mapped_column(String(180), nullable=True, unique=True)
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    transaction_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    property_type: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
+    bathrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    publication_status: Mapped[str] = mapped_column(
+        String(16), default="draft", server_default="draft", index=True
+    )
+    availability_status: Mapped[str] = mapped_column(
+        String(20), default="unconfirmed", server_default="unconfirmed", index=True
+    )
+    availability_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    content_permission_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    edit_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class PropertyMediaRecord(Base):
+    __tablename__ = "property_media"
+    __table_args__ = (Index("ix_property_media_public_order", "property_id", "is_public", "sort_order"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    property_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("properties.id", ondelete="RESTRICT"), index=True
+    )
+    original_object_path: Mapped[str] = mapped_column(Text)
+    derivative_object_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    public_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    alt_text: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    processing_status: Mapped[str] = mapped_column(
+        String(20), default="pending", server_default="pending", index=True
+    )
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class ListingVerificationRecord(Base):
+    """Staff review metadata; evidence references remain private to the application."""
+
+    __tablename__ = "listing_verifications"
+    __table_args__ = (Index("ix_listing_verifications_latest", "property_id", "reviewed_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    property_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("properties.id", ondelete="RESTRICT"), index=True
+    )
+    review_scope: Mapped[str] = mapped_column(String(160))
+    reviewer_id: Mapped[str] = mapped_column(String(128))
+    evidence_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result: Mapped[str] = mapped_column(String(20), index=True)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    public_source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class StaffUserRecord(Base):
+    __tablename__ = "staff_users"
+
+    provider_subject: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320))
+    display_name: Mapped[str] = mapped_column(String(128))
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class WebsiteInquiryRecord(Base):
+    __tablename__ = "website_inquiries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    property_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("properties.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    request_type: Mapped[str] = mapped_column(String(20), index=True)
+    client_name_ciphertext: Mapped[str] = mapped_column(Text)
+    contact_email_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contact_phone_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contact_preference: Mapped[str] = mapped_column(String(16))
+    message_redacted: Mapped[str] = mapped_column(Text, default="", server_default="")
+    consent_version: Mapped[str] = mapped_column(String(64))
+    consent_purpose: Mapped[str] = mapped_column(String(64))
+    consent_channel: Mapped[str] = mapped_column(String(32))
+    consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    workflow_status: Mapped[str] = mapped_column(
+        String(32), default="new", server_default="new", index=True
+    )
+    delivery_status: Mapped[str] = mapped_column(
+        String(24), default="not_configured", server_default="not_configured"
+    )
+    edit_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    assigned_staff_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    follow_up_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closing_outcome: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class WebsiteInquiryActivityRecord(Base):
+    __tablename__ = "website_inquiry_activity"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    inquiry_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("website_inquiries.id", ondelete="CASCADE"), index=True
+    )
+    actor_staff_id: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(32))
+    details_redacted: Mapped[str] = mapped_column(Text, default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True
     )
 
 

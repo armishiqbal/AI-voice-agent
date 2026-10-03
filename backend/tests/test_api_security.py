@@ -352,10 +352,13 @@ def test_clean_inventory_preview_can_be_confirmed_and_imported(
             batch_id = result["batch_id"]
             assert result["accepted"] == 1
             assert result["rejected"] == 0
-            rows = client.get("/v1/properties").json()
-            property_item = next(row for row in rows if row["id"] == import_id)
-            assert property_item["source"] == "owner-reviewed-rev-1"
-            assert property_item["source_version"] == "approved-rev-1"
+            # CSV imports are retained as drafts until staff classifies and approves them.
+            assert all(row["id"] != import_id for row in client.get("/v1/properties").json())
+            with SessionLocal() as session:
+                property_item = session.get(PropertyRecord, import_id)
+                assert property_item is not None
+                assert property_item.source == "owner-reviewed-rev-1"
+                assert property_item.source_version == "approved-rev-1"
     finally:
         with SessionLocal.begin() as session:
             session.execute(delete(PropertyRecord).where(PropertyRecord.id == import_id))

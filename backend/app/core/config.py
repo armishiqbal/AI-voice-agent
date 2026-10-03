@@ -11,7 +11,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 class Settings(BaseSettings):
     app_env: str = "development"
+    # Let the property website/API run when voice providers are unavailable.
+    # Operators must explicitly configure the voice stack before enabling this in production.
+    voice_enabled: bool = True
     database_url: str = "sqlite:///./awaaz-dev.db"
+    supabase_url: str | None = None
     cors_origins: str = (
         "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000,http://localhost:8000,http://127.0.0.1:8000"
     )
@@ -117,9 +121,9 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "GMAIL_SENDER is required when n8n appointment delivery is enabled with Google Calendar"
                 )
-        if self.app_env != "development" and self.llm_provider != "openai":
+        if self.app_env != "development" and self.voice_enabled and self.llm_provider != "openai":
             raise ValueError("LLM_PROVIDER=openai is required for live conversations")
-        if self.app_env != "development" and not self.openai_api_key:
+        if self.app_env != "development" and self.voice_enabled and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for live conversations")
         trusted_proxy_entries = [entry.strip() for entry in self.trusted_proxy_ips.split(",")]
         if not trusted_proxy_entries or any(
@@ -142,7 +146,11 @@ class Settings(BaseSettings):
             raise ValueError("TTS_PROVIDER must be router, fish, elevenlabs, or opensource")
         if self.tts_timeout_seconds <= 0:
             raise ValueError("TTS_TIMEOUT_SECONDS must be positive")
-        if self.tts_provider.casefold() == "opensource" and self.app_env != "development":
+        if (
+            self.tts_provider.casefold() == "opensource"
+            and self.app_env != "development"
+            and self.voice_enabled
+        ):
             if not self.tts_parler_service_url or not self.tts_chatterbox_service_url:
                 raise ValueError("Open-source multilingual TTS requires both model service URLs")
             if not self.tts_service_token:
@@ -172,14 +180,16 @@ class Settings(BaseSettings):
                 raise ValueError("PII_ENCRYPTION_KEY is required outside development")
             if not self.admin_api_key:
                 raise ValueError("ADMIN_API_KEY is required outside development")
-            if (
+            if self.voice_enabled and (
                 not self.voice_session_hmac_key
                 or len(self.voice_session_hmac_key.encode("utf-8")) < 32
             ):
                 raise ValueError(
                     "VOICE_SESSION_HMAC_KEY must contain at least 32 bytes outside development"
                 )
-            if self.voice_session_max_active is None or self.voice_session_max_active < 1:
+            if self.voice_enabled and (
+                self.voice_session_max_active is None or self.voice_session_max_active < 1
+            ):
                 raise ValueError(
                     "VOICE_SESSION_MAX_ACTIVE must be set to a positive value outside development"
                 )
@@ -227,7 +237,7 @@ class Settings(BaseSettings):
                     or parsed.fragment
                 ):
                     raise ValueError("Production CORS_ORIGINS must contain HTTPS origins only")
-            if self.tts_provider != "opensource":
+            if self.voice_enabled and self.tts_provider != "opensource":
                 raise ValueError(
                     "TTS_PROVIDER=opensource is required outside development; commercial and "
                     "legacy local providers are evaluation-only"

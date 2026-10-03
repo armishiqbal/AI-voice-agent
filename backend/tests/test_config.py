@@ -134,6 +134,20 @@ def test_production_requires_open_source_multilingual_tts_workers() -> None:
     assert provider_readiness(settings).multilingual_tts is True
 
 
+def test_production_website_can_run_with_voice_disabled() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+psycopg://user:pass@host/db",
+        pii_encryption_key="a" * 44,
+        admin_api_key="admin-key",
+        cors_origins="https://estate.example.com",
+        voice_enabled=False,
+        tts_provider="router",
+    )
+
+    assert not settings.voice_enabled
+
+
 def test_commercial_tts_credentials_do_not_satisfy_open_source_readiness() -> None:
     settings = Settings(
         tts_provider="fish",
