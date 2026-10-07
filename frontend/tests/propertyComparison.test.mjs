@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { availabilityLabel, canRequestVisit, filterAndSortProperties, inventorySourceLabel, inventoryStatusSummary, shouldAutoOpenInventoryImport } from "../src/propertyFacts.mjs";
+import { reviewedSizeLabel, availabilityLabel, canRequestVisit, filterAndSortProperties, inventorySourceLabel, inventoryStatusSummary, shouldAutoOpenInventoryImport } from "../src/propertyFacts.mjs";
 
 function formatPricePKR(price) {
   if (price >= 10_000_000) {
@@ -14,14 +14,6 @@ function formatPricePKR(price) {
   return `PKR ${price.toLocaleString()}`;
 }
 
-function getMarlaEquivalent(sqft) {
-  if (sqft >= 4500) {
-    const kanal = (sqft / 4500).toFixed(1).replace(/\.0$/, "");
-    return `${kanal} Kanal`;
-  }
-  const marla = (sqft / 225).toFixed(1).replace(/\.0$/, "");
-  return `${marla} Marla`;
-}
 
 test("formatPricePKR formats Crore, Lakh, and standard amounts accurately", () => {
   assert.equal(formatPricePKR(45_000_000), "PKR 4.5 Crore");
@@ -30,12 +22,11 @@ test("formatPricePKR formats Crore, Lakh, and standard amounts accurately", () =
   assert.equal(formatPricePKR(85_000), "PKR 85,000");
 });
 
-test("getMarlaEquivalent converts square feet to Pakistani land units", () => {
-  assert.equal(getMarlaEquivalent(225), "1 Marla");
-  assert.equal(getMarlaEquivalent(1125), "5 Marla");
-  assert.equal(getMarlaEquivalent(2250), "10 Marla");
-  assert.equal(getMarlaEquivalent(4500), "1 Kanal");
-  assert.equal(getMarlaEquivalent(9000), "2 Kanal");
+test("size conversions require reviewed locality basis", () => {
+  assert.equal(reviewedSizeLabel(1125), "1,125 sq ft");
+  assert.equal(reviewedSizeLabel(1125, 225), "5 Marla (1,125 sq ft)");
+  assert.equal(reviewedSizeLabel(1125, 272), "4.1 Marla (1,125 sq ft)");
+  assert.equal(reviewedSizeLabel(1125, 0), "1,125 sq ft");
 });
 
 test("visit requests require loaded available inventory", () => {

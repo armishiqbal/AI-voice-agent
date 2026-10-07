@@ -1,0 +1,127 @@
+.portal {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 48px 24px 80px;
+  font-family: var(--font-sans), sans-serif;
+}
+
+.portal h1 {
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: clamp(32px, 4vw, 48px);
+  font-weight: 500;
+  letter-spacing: -1px;
+  color: #0f1c16;
+  margin-bottom: 16px;
+}
+
+.portal p {
+  color: #566960;
+  font-size: 16px;
+  line-height: 1.6;
+  max-width: 720px;
+  margin-bottom: 24px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 24px;
+  margin: 32px 0;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #e0e9e1;
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: 0 4px 16px rgba(15, 28, 22, 0.04);
+}
+
+.panel h2, .panel h3 {
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 20px;
+  font-weight: 600;
+  color: #0f1c16;
+  margin-bottom: 8px;
+}
+
+.panel p {
+  font-size: 14px;
+  color: #566960;
+  margin-bottom: 16px;
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 32px;
+}
+
+.links a {
+  display: inline-flex;
+  align-items: center;
+  padding: 10px 20px;
+  border-radius: 8px;
+  background: #18523c;
+  color: #ffffff;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 14px;
+  transition: background 0.15s ease;
+}
+
+.links a:hover {
+  background: #0e3526;
+}
+
+.search {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background: #ffffff;
+  border: 1px solid #e0e9e1;
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 24px;
+  max-width: 600px;
+}
+
+.search label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f1c16;
+}
+
+.search input,
+.search select {
+  padding: 10px 14px;
+  border: 1px solid #dce4de;
+  border-radius: 8px;
+  font-size: 15px;
+  font-family: inherit;
+}
+
+.search button {
+  align-self: flex-start;
+  padding: 10px 24px;
+  background: #18523c;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.search button:hover {
+  background: #0e3526;
+}
+
+.search button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

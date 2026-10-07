@@ -3,6 +3,13 @@ export type AgentDecision = {
   spoken_text: string;
   property_ids?: string[];
   reason?: string | null;
+  actions?: Array<{
+    id?: string;
+    kind: string;
+    payload?: Record<string, unknown>;
+    summary?: string;
+    executed?: boolean;
+  }>;
 };
 
 export type AcousticEmotion = {

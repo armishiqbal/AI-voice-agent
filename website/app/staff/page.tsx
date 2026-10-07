@@ -1,3 +1,4 @@
-import { metadata } from "@/lib/site";
-export const generateMetadata = () => ({ ...metadata("Staff access", "Awaaz Estate staff workspace.", "/staff"), robots: { index: false, follow: false } });
-export default function Staff() { return <section className="section container prose"><p className="eyebrow">Staff workspace</p><h1>Staff access is not available yet</h1><p>This workspace will open when staff authentication and permissions are configured. Company records and administrative tools are not available through this page.</p></section>; }
+import DevelopmentStaffPanel from "@/components/DevelopmentStaffPanel";
+import {ModerationWorkspace} from "@/components/ModerationWorkspace";
+export const metadata={title:"Staff workspace",robots:{index:false,follow:false}};
+export default function Page(){return process.env.NODE_ENV==="development"&&process.env.AWAAZ_DEV_STAFF_TOOLS==="true"?<DevelopmentStaffPanel/>:<ModerationWorkspace/>;}

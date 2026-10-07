@@ -25,3 +25,4 @@ export declare function filterAndSortProperties<T extends {
   bedrooms: number;
   price_pkr: number;
 }>(properties: readonly T[], filters?: PropertyBrowseFilters): T[];
+export declare function reviewedSizeLabel(sqft: number, sqftPerMarla?: number | null): string;

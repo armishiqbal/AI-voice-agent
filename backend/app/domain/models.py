@@ -63,14 +63,30 @@ class ConversationTurn(BaseModel):
     language: Literal["ur-Latn", "ur-Arab", "en", "hi", "ar", "pa", "bn"] = "ur-Latn"
 
 
+class AgentAction(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    kind: Literal[
+        "filter_catalog",
+        "compare_properties",
+        "shortlist_property",
+        "calculate_mortgage",
+        "schedule_viewing",
+        "navigate_to",
+    ]
+    payload: dict[str, object] = Field(default_factory=dict)
+    summary: str = Field(default="", max_length=500)
+    executed: bool = True
+
+
 class AgentDecision(BaseModel):
     kind: Literal[
-        "answer", "ask_clarification", "recommend", "book", "reschedule", "cancel", "handoff"
+        "answer", "ask_clarification", "recommend", "book", "reschedule", "cancel", "handoff", "execute_action"
     ]
     spoken_text: str = Field(min_length=1, max_length=2000)
     property_ids: list[str] = Field(default_factory=list, max_length=10)
     source_ids: list[str] = Field(default_factory=list, max_length=10)
     reason: str | None = None
+    actions: list[AgentAction] = Field(default_factory=list)
 
 
 class AppointmentRequest(BaseModel):
@@ -120,7 +136,7 @@ class Appointment(BaseModel):
     client_name: str
     contact_email: EmailStr
     contact_phone: str | None = None
-    status: Literal["booked", "cancelled", "rescheduled"] = "booked"
+    status: Literal["booked", "cancelled", "rescheduled", "completed"] = "booked"
 
 
 class AppointmentUpdate(BaseModel):

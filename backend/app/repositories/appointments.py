@@ -15,7 +15,9 @@ from app.repositories.properties import SqlPropertyRepository
 from app.repositories.records import (
     AppointmentActionRecord,
     AppointmentRecord,
+    MembershipRecord,
     OutboxEventRecord,
+    PropertyRecord,
     ToolAuditEventRecord,
 )
 from app.services.appointments import redact_for_retention
@@ -25,10 +27,24 @@ class SqlAppointmentService:
     def __init__(self, properties: SqlPropertyRepository, session_factory=SessionLocal) -> None:
         self.properties = properties
         self.session_factory = session_factory
-        self.cipher = ContactCipher()
+
+    @property
+    def cipher(self) -> ContactCipher:
+        return ContactCipher()
 
     @staticmethod
     def _employee_email(request: AppointmentRequest) -> str | None:
+        if settings.marketplace_enabled:
+            with SessionLocal() as session:
+                member = session.scalar(
+                    select(MembershipRecord).where(
+                        MembershipRecord.subject == request.employee.removeprefix("agent:"),
+                        MembershipRecord.active.is_(True),
+                    )
+                )
+                if not member:
+                    raise ValueError("Assigned agent has no active notification mapping")
+                return member.email
         directory = {
             name.casefold(): str(email) for name, email in settings.employee_email_directory.items()
         }
@@ -111,15 +127,21 @@ class SqlAppointmentService:
         slots: list[datetime] = []
         for day_offset in range(horizon_days + 1):
             slot_date = first_date + timedelta(days=day_offset)
-            if slot_date.weekday() >= 6:
+            if not settings.marketplace_enabled and slot_date.weekday() >= 6:
                 continue
-            for hour in range(10, 18):
+            for hour in range(24) if settings.marketplace_enabled else range(10, 18):
                 for minute in (0, 30):
                     slot = datetime.combine(
                         slot_date, time(hour, minute), tzinfo=ZoneInfo("Asia/Karachi")
                     )
                     if slot <= now_local or slot in occupied:
                         continue
+                    if settings.marketplace_enabled:
+                        from app.catalog.scheduling import eligible_schedule
+
+                        with self.session_factory() as session:
+                            if not eligible_schedule(session, property_id, slot):
+                                continue
                     slots.append(slot)
                     if len(slots) >= limit:
                         return slots
@@ -153,11 +175,13 @@ class SqlAppointmentService:
             record = session.scalar(
                 select(AppointmentRecord).where(AppointmentRecord.reference == reference)
             )
-            if (
-                record is None
-                or self.cipher.decrypt(record.contact_email_ciphertext).casefold()
-                != contact_email.casefold()
-            ):
+            try:
+                stored_email = (
+                    self.cipher.decrypt(record.contact_email_ciphertext) if record else ""
+                )
+            except Exception:  # noqa: BLE001 - contact may have expired under retention policy
+                stored_email = ""
+            if record is None or stored_email.casefold() != contact_email.casefold():
                 raise ValueError("Appointment reference and contact email do not match")
             return self._domain(record)
 
@@ -171,7 +195,9 @@ class SqlAppointmentService:
             )
         )
 
-    def book(self, request: AppointmentRequest) -> Appointment:
+    def book(self, request: AppointmentRequest, *, verified_contact: bool = False) -> Appointment:
+        if settings.marketplace_enabled and not verified_contact:
+            raise ValueError("Verify your contact through the property viewing form before booking")
         try:
             return self._book_once(request)
         except IntegrityError as error:
@@ -225,7 +251,14 @@ class SqlAppointmentService:
                     {"property_id": request.property_id},
                 )
                 raise ValueError("The selected employee is not assigned to this property")
-            if not self._valid_slot(request.starts_at):
+            from app.catalog.scheduling import eligible_schedule
+
+            slot_valid = (
+                eligible_schedule(session, request.property_id, request.starts_at)
+                if settings.marketplace_enabled
+                else self._valid_slot(request.starts_at)
+            )
+            if not slot_valid:
                 self._audit(
                     session,
                     "appointment.book",
@@ -234,7 +267,9 @@ class SqlAppointmentService:
                     {"property_id": request.property_id},
                 )
                 raise ValueError(
-                    "Visits are available Monday-Saturday, 10:00-18:00 PKT in 30-minute slots"
+                    "The assigned agent is not available at that time"
+                    if settings.marketplace_enabled
+                    else "Visits are available Monday-Saturday, 10:00-18:00 PKT in 30-minute slots"
                 )
             conflict = session.scalar(
                 select(AppointmentRecord).where(
@@ -252,7 +287,10 @@ class SqlAppointmentService:
                     {"property_id": request.property_id},
                 )
                 raise ValueError("The assigned employee is already booked for that slot")
+            property_record = session.get(PropertyRecord, request.property_id)
             record = AppointmentRecord(
+                organization_id=property_record.organization_id if property_record else None,
+                agent_subject=property_record.assigned_staff_id if property_record else None,
                 id=str(uuid4()),
                 reference=f"AES-{uuid4().hex[:10].upper()}",
                 property_id=request.property_id,
@@ -296,7 +334,11 @@ class SqlAppointmentService:
             session.flush()
             return self._domain(record)
 
-    def update(self, update: AppointmentUpdate, cancel: bool = False) -> Appointment:
+    def update(
+        self, update: AppointmentUpdate, cancel: bool = False, *, verified_contact: bool = False
+    ) -> Appointment:
+        if settings.marketplace_enabled and not verified_contact:
+            raise ValueError("Sign in to manage your viewing")
         try:
             return self._update_once(update, cancel)
         except IntegrityError as error:
@@ -349,15 +391,31 @@ class SqlAppointmentService:
                 )
                 raise ValueError("Appointment reference and contact email do not match")
             if cancel:
-                record.status, event_type = "cancelled", "appointment.cancelled"
+                record.status, record.closed_at, event_type = (
+                    "cancelled",
+                    datetime.now(UTC),
+                    "appointment.cancelled",
+                )
             else:
-                if record.status == "cancelled":
+                if record.status in {"cancelled", "completed"}:
                     raise ValueError(
-                        "Cancelled appointments cannot be rescheduled; create a new booking"
+                        "Closed appointments cannot be rescheduled; create a new booking"
                     )
                 if self.properties.get_available(record.property_id) is None:
                     raise ValueError("Property is unavailable; the visit cannot be rescheduled")
-                if update.starts_at is None or not self._valid_slot(update.starts_at):
+                from app.catalog.scheduling import eligible_schedule
+
+                schedule_ok = update.starts_at is not None and (
+                    eligible_schedule(
+                        session,
+                        record.property_id,
+                        update.starts_at,
+                        agent_subject=record.agent_subject,
+                    )
+                    if settings.marketplace_enabled
+                    else self._valid_slot(update.starts_at)
+                )
+                if not schedule_ok:
                     raise ValueError("Provide an eligible new appointment slot")
                 conflict = session.scalar(
                     select(AppointmentRecord).where(
@@ -376,9 +434,10 @@ class SqlAppointmentService:
                         {},
                     )
                     raise ValueError("The assigned employee is already booked for that slot")
-                record.starts_at, record.status, event_type = (
+                record.starts_at, record.status, record.closed_at, event_type = (
                     self._as_utc(update.starts_at),
                     "rescheduled",
+                    None,
                     "appointment.rescheduled",
                 )
             previous_event = session.scalar(

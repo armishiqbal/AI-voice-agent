@@ -13,6 +13,8 @@ type Property = {
 
 type MortgageCalculatorModalProps = {
   property?: Property | null;
+  initialDownPaymentPct?: number;
+  initialTenureYears?: number;
   onClose: () => void;
   onBookConsultation: (propertyId?: string) => void;
 };
@@ -29,11 +31,17 @@ function formatPricePKR(price: number): string {
   return `PKR ${Math.round(price).toLocaleString()}`;
 }
 
-export function MortgageCalculatorModal({ property, onClose, onBookConsultation }: MortgageCalculatorModalProps) {
+export function MortgageCalculatorModal({
+  property,
+  initialDownPaymentPct,
+  initialTenureYears,
+  onClose,
+  onBookConsultation,
+}: MortgageCalculatorModalProps) {
   const dialogRef = useNativeDialog(true);
   const [price, setPrice] = useState<number>(property?.price_pkr ?? 0);
-  const [downPaymentPct, setDownPaymentPct] = useState<number>(25);
-  const [tenureYears, setTenureYears] = useState<number>(5);
+  const [downPaymentPct, setDownPaymentPct] = useState<number>(initialDownPaymentPct ?? 25);
+  const [tenureYears, setTenureYears] = useState<number>(initialTenureYears ?? 5);
   const [annualRate, setAnnualRate] = useState<number>(14.5);
 
   const estimate = calculateInstallment(price, downPaymentPct, tenureYears, annualRate);

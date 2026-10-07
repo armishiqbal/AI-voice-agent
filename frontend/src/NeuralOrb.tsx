@@ -77,40 +77,40 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
       let speedX = 0.003;
       let pulseAmp = 3.5;
       let waveFreq = 2.5;
-      let coreColor = "rgba(139, 92, 246, 0.22)";
-      let particleHue = 272; // luxury violet
-      let ringGlow = "rgba(168, 85, 247, 0.4)";
+      let coreColor = "rgba(38, 132, 90, 0.22)";
+      let particleHue = 148;
+      let ringGlow = "rgba(38, 132, 90, 0.4)";
 
       if (voicePhase === "listening") {
         speedY = 0.014;
         pulseAmp = 15;
         waveFreq = 7;
-        coreColor = "rgba(52, 211, 153, 0.35)"; // green reactive
-        particleHue = 160; // cyan-green
+        coreColor = "rgba(52, 151, 101, 0.35)";
+        particleHue = 150;
         ringGlow = "rgba(52, 211, 153, 0.7)";
       } else if (voicePhase === "transcribing") {
         speedY = 0.02;
         speedX = 0.008;
         pulseAmp = 8;
         waveFreq = 5;
-        coreColor = "rgba(56, 189, 248, 0.38)";
-        particleHue = 195;
-        ringGlow = "rgba(56, 189, 248, 0.72)";
+        coreColor = "rgba(104, 151, 164, 0.38)";
+        particleHue = 185;
+        ringGlow = "rgba(82, 137, 151, 0.72)";
       } else if (voicePhase === "thinking") {
         speedY = 0.028;
         speedX = 0.015;
         pulseAmp = 9;
         waveFreq = 9;
-        coreColor = "rgba(99, 102, 241, 0.5)";
-        particleHue = 245; // electric indigo
-        ringGlow = "rgba(99, 102, 241, 0.7)";
+        coreColor = "rgba(143, 157, 103, 0.42)";
+        particleHue = 84;
+        ringGlow = "rgba(124, 145, 79, 0.7)";
       } else if (voicePhase === "speaking") {
         speedY = 0.015;
         pulseAmp = isAudioActive ? 18 : 12;
         waveFreq = 5.5;
-        coreColor = "rgba(236, 72, 153, 0.45)"; // magenta-rose
-        particleHue = 300; // magenta
-        ringGlow = "rgba(236, 72, 153, 0.7)";
+        coreColor = "rgba(47, 142, 96, 0.42)";
+        particleHue = 145;
+        ringGlow = "rgba(38, 132, 90, 0.7)";
       } else if (voicePhase === "error") {
         speedY = 0.003;
         coreColor = "rgba(239, 68, 68, 0.25)";
@@ -178,7 +178,7 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
       ctx.shadowBlur = 0;
 
       // Ring 2: Counter-Rotating Intersecting Gimbal Ring
-      ctx.strokeStyle = "rgba(192, 132, 252, 0.35)";
+      ctx.strokeStyle = "rgba(95, 140, 108, 0.34)";
       ctx.lineWidth = 1.2;
       ctx.setLineDash([14, 18]);
       ctx.beginPath();
@@ -199,7 +199,7 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
       ctx.fill();
 
       // Ring 3: Equatorial Horizon Ring with radar tick arcs
-      ctx.strokeStyle = "rgba(139, 92, 246, 0.5)";
+      ctx.strokeStyle = "rgba(57, 113, 76, 0.5)";
       ctx.lineWidth = 1.6;
       ctx.setLineDash([]);
       ctx.beginPath();
@@ -210,7 +210,7 @@ export function NeuralOrb({ voicePhase, isAudioActive = false, onClick, audioAna
       ctx.stroke();
 
       // Ring 4: Outer Faint Boundary Ring with Degree Ticks
-      ctx.strokeStyle = "rgba(168, 85, 247, 0.18)";
+      ctx.strokeStyle = "rgba(57, 113, 76, 0.18)";
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 14]);
       ctx.beginPath();

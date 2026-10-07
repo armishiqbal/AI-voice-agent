@@ -1,4 +1,22 @@
-# Awaaz Estate — property website and multilingual voice agent
+# Awaaz Estate — Multilingual AI Voice Agent & Luxury Real Estate Marketplace
+
+<p align="center">
+  <a href="https://github.com/haroonsh-dev"><img src="https://img.shields.io/badge/Lead%20Architect-haroonsh--dev-18523c?style=for-the-badge&logo=github&logoColor=white" alt="Lead Architect: haroonsh-dev" /></a>
+  <a href="https://github.com/haroonsh-dev"><img src="https://img.shields.io/badge/Maintainer-Haroon%20Shahid-0e3526?style=for-the-badge&logo=git&logoColor=white" alt="Maintained by Haroon Shahid" /></a>
+  <a href="https://github.com/armishiqbal/AI-voice-agent/actions"><img src="https://img.shields.io/github/actions/workflow/status/armishiqbal/AI-voice-agent/ci.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI%20Pipeline" alt="CI Pipeline" /></a>
+  <img src="https://img.shields.io/badge/AI%20Voice%20Agent-Autonomous%20%C2%B7%20Multimodal-18523c?style=for-the-badge&logo=openai&logoColor=white" alt="AI Voice Agent" />
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Next.js-15.5.24-black?style=flat-square&logo=next.js&logoColor=white" alt="Next.js" />
+  <img src="https://img.shields.io/badge/React-19.3.0-61dafb?style=flat-square&logo=react&logoColor=black" alt="React 19" />
+  <img src="https://img.shields.io/badge/TypeScript-5.7.3-3178c6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/FastAPI-Python%203.11+-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/PostgreSQL-16%20%C2%B7%20Supabase-336791?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/Civic%20Compliance-CDA%20%C2%B7%20DHA%20%C2%B7%20RDA-226e52?style=flat-square" alt="Civic Compliance" />
+  <img src="https://img.shields.io/badge/Backend%20Tests-85%2F85%20Passing-2ea44f?style=flat-square&logo=pytest&logoColor=white" alt="Tests" />
+  <img src="https://img.shields.io/badge/Design%20System-100%25%20SVG%20%C2%B7%20Zero%20Emojis-18523c?style=flat-square" alt="Design System" />
+</p>
 
 FastAPI and PostgreSQL remain the business authority for the Awaaz Estate property catalog,
 inquiries, appointments, and the multilingual voice assistant. The public property website is a

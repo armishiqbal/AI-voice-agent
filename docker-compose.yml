@@ -7,6 +7,7 @@ x-runtime: &runtime
     DATABASE_URL: postgresql+psycopg://awaaz:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/awaaz
     API_HOST: 0.0.0.0
     VOICE_ENABLED: ${VOICE_ENABLED:-true}
+    ASSISTANT_CONCIERGE_ENABLED: ${ASSISTANT_CONCIERGE_ENABLED:-false}
   volumes:
     - ./secrets:/app/secrets:ro
     - voice-artifacts:/app/artifacts
@@ -42,12 +43,19 @@ services:
     build:
       context: .
       dockerfile: website/Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:-}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+        NEXT_PUBLIC_MAPTILER_KEY: ${NEXT_PUBLIC_MAPTILER_KEY:-}
+        NEXT_PUBLIC_MAP_ENABLED: ${NEXT_PUBLIC_MAP_ENABLED:-false}
     environment:
       AWAAZ_API_URL: http://api:8000
       SITE_URL: ${SITE_URL:-http://localhost:8080}
       ASSISTANT_URL: ${ASSISTANT_URL:-http://localhost:8080/assistant/}
+      ASSISTANT_CONCIERGE_ENABLED: ${ASSISTANT_CONCIERGE_ENABLED:-false}
       CONTACT_EMAIL: ${CONTACT_EMAIL:-}
       CONTACT_PHONE: ${CONTACT_PHONE:-}
+      CONTACT_WHATSAPP: ${CONTACT_WHATSAPP:-}
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
     depends_on:

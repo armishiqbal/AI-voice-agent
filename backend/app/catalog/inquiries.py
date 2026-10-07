@@ -240,11 +240,17 @@ def create_public_inquiry(payload: PublicInquiryCreate) -> PublicInquiryReceipt:
 
     if payload.property_id and PublicCatalogRepository().get_public_by_id(payload.property_id) is None:
         raise HTTPException(status_code=404, detail="Published property was not found")
+    from app.repositories.records import PropertyRecord
+    with SessionLocal() as session:
+        property_record=session.get(PropertyRecord,payload.property_id) if payload.property_id else None
+        org_id=property_record.organization_id if property_record else "awaaz"
+        agent_id=property_record.assigned_staff_id if property_record else None
     cipher = ContactCipher()
     now = datetime.now(UTC)
     inquiry_id = str(uuid4())
     record = WebsiteInquiryRecord(
         id=inquiry_id,
+        organization_id=org_id,agent_subject=agent_id,assigned_staff_id=agent_id,
         idempotency_key=key,
         request_fingerprint=fingerprint,
         property_id=payload.property_id,

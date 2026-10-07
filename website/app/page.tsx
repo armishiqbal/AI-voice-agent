@@ -1,18 +1,102 @@
 import Link from "next/link";
 import { listings } from "@/lib/catalog";
 import { metadata } from "@/lib/site";
-import { SearchForm } from "@/components/SearchForm";
-import { ListingCard } from "@/components/ListingCard";
-import { Notice } from "@/components/Notice";
+import { ModernSearchConsole } from "@/components/ModernSearchConsole";
+import { MarketMetricsBar } from "@/components/MarketMetricsBar";
+import { FeaturedInventoryTabs } from "@/components/FeaturedInventoryTabs";
+import { NeighborhoodExplorer } from "@/components/NeighborhoodExplorer";
+import { HowAwaazWorks } from "@/components/HowAwaazWorks";
+import { VoiceAssistantBanner } from "@/components/VoiceAssistantBanner";
+import { SellerConciergeBanner } from "@/components/SellerConciergeBanner";
+import { AdvisoryCovenantSection } from "@/components/AdvisoryCovenantSection";
+
 export const dynamic = "force-dynamic";
-export const generateMetadata = () => metadata("Find your next place", "Explore Awaaz Estate company listings, compare properties and request a viewing.", "/");
+
+export const generateMetadata = () =>
+  metadata(
+    "Awaaz Estate · Verified Real Estate in Islamabad & Rawalpindi",
+    "Explore physical on-site audited villas, luxury apartments, and corporate offices across Islamabad & Rawalpindi with transparent title scrutiny and direct licensed representation.",
+    "/"
+  );
+
 export default async function Home() {
-  const catalog = await listings({ page_size: "6", sort: "newest" }).catch(() => null);
-  return <>
-    <section className="hero"><div className="container"><div className="hero-copy"><p className="eyebrow">Awaaz Estate · Your property search</p><h1>A place for your<br /><em>next chapter.</em></h1><p>Explore homes, plots and commercial spaces. See the details, ask a question and take the next step with our team.</p></div><SearchForm /><p className="quiet" style={{ marginTop: 18 }}>Prefer to talk it through? <Link href="/assistant">Ask our voice assistant</Link>.</p></div></section>
-    <section className="section container"><div className="section-heading"><div><h2>Explore our listings</h2><p>Company properties, with availability shown clearly.</p></div><Link className="text-link" href="/properties">See all properties →</Link></div>
-      {!catalog ? <Notice error title="Listings are temporarily unavailable"><p>We could not connect to the property service. You can still contact the team.</p><Link className="text-link" href="/contact">Contact Awaaz Estate</Link></Notice> : !catalog.data.length ? <Notice title="Our catalog is being prepared"><p>There are no published properties to show yet. Share your requirements and our team can follow up.</p><Link className="text-link" href="/contact">Tell us what you need</Link></Notice> : <div className="listing-grid">{catalog.data.map((property) => <ListingCard key={property.id} property={property} />)}</div>}
-    </section>
-    <section className="section container"><h2>From a search to a site visit</h2><div className="steps"><article><strong>01 · EXPLORE</strong><h3>Find your shortlist</h3><p>Filter by location, purpose and budget. Compare the facts that matter to you.</p></article><article><strong>02 · ASK</strong><h3>Get a clearer picture</h3><p>Send an inquiry or ask Awaaz about a listing. Our team can help confirm the details.</p></article><article><strong>03 · VISIT</strong><h3>See it in person</h3><p>Request a viewing. A request becomes an appointment once availability and the visit are confirmed.</p></article></div></section>
-  </>;
+  const catalog = await listings({ page_size: "12", sort: "newest" }).catch(() => null);
+
+  return (
+    <>
+      {/* 1. Hero & Modern Search Console */}
+      <section className="modern-hero">
+        <div className="container">
+          <div className="hero-text-block">
+            <span className="hero-pill-badge">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+              Pakistan&apos;s Premier Verified Real Estate Exchange
+            </span>
+            <h1 className="hero-main-title">
+              Find your <span className="hero-gradient-text">next chapter</span> in verified luxury.
+            </h1>
+            <p className="hero-subtitle">
+              Explore rigorously audited residential and commercial properties across Islamabad and Rawalpindi. Transparent title provenance, physical on-site surveys, and direct licensed representation.
+            </p>
+          </div>
+
+          <ModernSearchConsole />
+        </div>
+      </section>
+
+      {/* 2. Institutional Operational Indicators */}
+      <MarketMetricsBar />
+
+      {/* 3. Actual Properties: Featured Inventory Tabs */}
+      <section className="section container">
+        <div className="section-heading-modern">
+          <div>
+            <span className="section-eyebrow">Direct Agency Inventory</span>
+            <h2 className="section-title">Featured Real Estate in Islamabad &amp; Rawalpindi</h2>
+            <p className="section-subtitle">Every active listing is physically inspected with confirmed civic documentation.</p>
+          </div>
+        </div>
+
+        <FeaturedInventoryTabs properties={catalog?.data ?? []} />
+      </section>
+
+      {/* 4. Covered Areas: Neighborhood Explorer */}
+      <section className="section container">
+        <div className="section-heading">
+          <div>
+            <span className="section-eyebrow">Prime Locations</span>
+            <h2>Architectural Neighborhood Guides</h2>
+            <p>Explore master-planned gated enclaves, diplomatic sectors, and investment corridors.</p>
+          </div>
+          <Link className="button secondary small" href="/areas">
+            Explore All Areas →
+          </Link>
+        </div>
+
+        <NeighborhoodExplorer />
+      </section>
+
+      {/* 5. How It Works: Clear Institutional Process */}
+      <section className="section container">
+        <HowAwaazWorks />
+      </section>
+
+      {/* 6. Optional Voice Assistant Banner */}
+      <section className="section container">
+        <VoiceAssistantBanner />
+      </section>
+
+      {/* 7. Seller Concierge: Developer & Owner Submission */}
+      <section className="section container">
+        <SellerConciergeBanner />
+      </section>
+
+      {/* 8. Company Contacts & Verification Covenant */}
+      <section className="section container">
+        <AdvisoryCovenantSection />
+      </section>
+    </>
+  );
 }

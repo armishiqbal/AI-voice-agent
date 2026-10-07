@@ -7,7 +7,7 @@ from functools import lru_cache
 from urllib.parse import urlsplit
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient, PyJWKClientConnectionError, PyJWKClientError
 from jwt.exceptions import PyJWTError
@@ -59,16 +59,45 @@ def _supabase_issuer_and_jwks_url() -> tuple[str, str]:
 
 
 def require_staff(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> StaffPrincipal:
+    if credentials is None and request.cookies.get("awaaz_session"):
+        from app.catalog.identity import require_identity
+        identity = require_identity(request)
+        if identity.assurance != "aal2":
+            raise HTTPException(403, "Staff authenticator MFA is required")
+        with SessionLocal() as session:
+            staff = session.get(StaffUserRecord, identity.subject)
+            if not staff or not staff.is_active or staff.role not in _STAFF_ROLES:
+                raise HTTPException(403, "Staff account is not authorized")
+            return StaffPrincipal(staff.provider_subject, staff.email, staff.display_name, staff.role)
     if credentials is None or credentials.scheme.casefold() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="A verified staff session is required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    issuer, jwks_url = _supabase_issuer_and_jwks_url()
     token = credentials.credentials
+    if settings.app_env == "development" and token.startswith("dev-staff-"):
+        subject = token.removeprefix("dev-staff-")
+        with SessionLocal() as session:
+            staff = session.scalar(
+                select(StaffUserRecord).where(
+                    StaffUserRecord.provider_subject == subject,
+                    StaffUserRecord.is_active.is_(True),
+                )
+            )
+            if staff is None or staff.role not in _STAFF_ROLES:
+                raise HTTPException(status_code=403, detail="Staff account is not authorized")
+            return StaffPrincipal(
+                subject=staff.provider_subject,
+                email=staff.email,
+                display_name=staff.display_name,
+                role=staff.role,
+            )
+
+    issuer, jwks_url = _supabase_issuer_and_jwks_url()
     try:
         signing_key = _jwks_client(jwks_url).get_signing_key_from_jwt(token).key
         claims = jwt.decode(

@@ -10,7 +10,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
+    public_website_url: str = "http://localhost:3000"
+    marketplace_enabled: bool = False
+    customer_features_enabled: bool = False
+    map_enabled: bool = False
+    supabase_service_role_key: str | None = None
+    supabase_anon_key: str | None = None
     app_env: str = "development"
+    assistant_concierge_enabled: bool | None = None
     # Let the property website/API run when voice providers are unavailable.
     # Operators must explicitly configure the voice stack before enabling this in production.
     voice_enabled: bool = True
@@ -97,6 +104,13 @@ class Settings(BaseSettings):
     google_client_secret_path: str | None = None
     google_calendar_id: str = "primary"
     gmail_sender: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: EmailStr | None = None
+    smtp_starttls: bool = True
+    smtp_ssl: bool = False
     employee_email_directory: dict[str, EmailStr] = {}
     n8n_webhook_url: str | None = None
     n8n_webhook_token: str | None = None
@@ -106,6 +120,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime_boundary(self) -> "Settings":
+        if self.smtp_ssl and self.smtp_starttls:
+            raise ValueError("SMTP_SSL and SMTP_STARTTLS cannot both be enabled")
+        if self.smtp_host and not self.smtp_from_email:
+            raise ValueError("SMTP_FROM_EMAIL is required when SMTP_HOST is configured")
+        if bool(self.smtp_username) != bool(self.smtp_password):
+            raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be configured together")
         if bool(self.n8n_webhook_url) != bool(self.n8n_webhook_token):
             raise ValueError("N8N_WEBHOOK_URL and N8N_WEBHOOK_TOKEN must be configured together")
         if self.n8n_webhook_url:

@@ -12,17 +12,40 @@ def create_schema_for_local_development() -> None:
     if engine.dialect.name != "sqlite":
         return
     additions = {
-        "appointments": {"contact_phone_ciphertext": "TEXT"},
+        "appointments": {"contact_phone_ciphertext": "TEXT", "organization_id": "VARCHAR(36)", "agent_subject": "VARCHAR(128)", "closed_at": "DATETIME"},
         "conversation_states": {
             "tool_results": "JSON NOT NULL DEFAULT '{}'",
             "bedrooms": "INTEGER",
             "amenities": "JSON NOT NULL DEFAULT '[]'",
             "investment_goal": "VARCHAR(100)",
         },
-        "properties": {"investment_goals": "JSON NOT NULL DEFAULT '[]'"},
+        "properties": {
+            "organization_id": "VARCHAR(36)", "classification": "VARCHAR(16)", "rental_period": "VARCHAR(16)", "coordinates_approved_at": "DATETIME",
+            "investment_goals": "JSON NOT NULL DEFAULT '[]'",
+            "assigned_staff_id": "VARCHAR(128)",
+            "slug": "VARCHAR(180)",
+            "description": "TEXT NOT NULL DEFAULT ''",
+            "transaction_type": "VARCHAR(16)",
+            "property_type": "VARCHAR(24)",
+            "bathrooms": "INTEGER",
+            "publication_status": "VARCHAR(16) NOT NULL DEFAULT 'draft'",
+            "availability_status": "VARCHAR(20) NOT NULL DEFAULT 'unconfirmed'",
+            "availability_confirmed_at": "DATETIME",
+            "content_permission_confirmed_at": "DATETIME",
+            "edit_version": "INTEGER NOT NULL DEFAULT 1",
+            "published_at": "DATETIME",
+            "latitude": "FLOAT",
+            "longitude": "FLOAT",
+        },
         "leads": {
             "follow_up_at": "DATETIME",
             "follow_up_enqueued_at": "DATETIME",
+        },
+        "website_inquiries": {
+            "organization_id": "VARCHAR(36)", "agent_subject": "VARCHAR(128)",
+            "assigned_staff_id": "VARCHAR(128)",
+            "follow_up_at": "DATETIME",
+            "closing_outcome": "VARCHAR(64)",
         },
     }
     with engine.begin() as connection:

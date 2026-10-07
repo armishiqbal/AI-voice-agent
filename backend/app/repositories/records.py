@@ -47,6 +47,12 @@ class PropertyRecord(Base):
     transaction_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     property_type: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
     bathrooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    organization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    classification: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    rental_period: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    coordinates_approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     publication_status: Mapped[str] = mapped_column(
         String(16), default="draft", server_default="draft", index=True
     )
@@ -67,7 +73,9 @@ class PropertyRecord(Base):
 
 class PropertyMediaRecord(Base):
     __tablename__ = "property_media"
-    __table_args__ = (Index("ix_property_media_public_order", "property_id", "is_public", "sort_order"),)
+    __table_args__ = (
+        Index("ix_property_media_public_order", "property_id", "is_public", "sort_order"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     property_id: Mapped[str] = mapped_column(
@@ -81,7 +89,9 @@ class PropertyMediaRecord(Base):
     processing_status: Mapped[str] = mapped_column(
         String(20), default="pending", server_default="pending", index=True
     )
-    is_public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
+    is_public: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
@@ -113,7 +123,9 @@ class StaffUserRecord(Base):
     email: Mapped[str] = mapped_column(String(320))
     display_name: Mapped[str] = mapped_column(String(128))
     role: Mapped[str] = mapped_column(String(20), index=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
@@ -121,6 +133,8 @@ class StaffUserRecord(Base):
 
 class WebsiteInquiryRecord(Base):
     __tablename__ = "website_inquiries"
+    organization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    agent_subject: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     idempotency_key: Mapped[str] = mapped_column(String(36), unique=True, index=True)
@@ -254,6 +268,8 @@ class ConversationStateRecord(Base):
 
 class AppointmentRecord(Base):
     __tablename__ = "appointments"
+    organization_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    agent_subject: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     __table_args__ = (
         Index(
             "uq_appointments_active_employee_slot",
@@ -270,6 +286,9 @@ class AppointmentRecord(Base):
     employee: Mapped[str] = mapped_column(String(128))
     employee_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     client_name: Mapped[str] = mapped_column(String(100), default="")
     contact_email_ciphertext: Mapped[str] = mapped_column(Text)
     contact_phone_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -340,3 +359,209 @@ class VoiceSessionLeaseRecord(Base):
     client_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class AreaGuideRecord(Base):
+    __tablename__ = "area_guides"
+    __table_args__ = (Index("uq_area_guides_city_area", "city_slug", "area_slug", unique=True),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    city_slug: Mapped[str] = mapped_column(String(64), index=True)
+    area_slug: Mapped[str] = mapped_column(String(128), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    overview_markdown: Mapped[str] = mapped_column(Text, default="")
+    amenities_summary: Mapped[str] = mapped_column(Text, default="")
+    transport_info: Mapped[str] = mapped_column(Text, default="")
+    investment_outlook: Mapped[str] = mapped_column(Text, default="")
+    publication_status: Mapped[str] = mapped_column(String(16), default="draft", index=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewer_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sources_json: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class OrganizationRecord(Base):
+    __tablename__ = "organizations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    slug: Mapped[str] = mapped_column(String(128), unique=True)
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    contact_email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    contact_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    coverage: Mapped[list[str]] = mapped_column(JSON, default=list)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    edit_version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MembershipRecord(Base):
+    __tablename__ = "organization_memberships"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    subject: Mapped[str] = mapped_column(String(128), index=True)
+    email: Mapped[str] = mapped_column(String(254))
+    role: Mapped[str] = mapped_column(String(20))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    display_name: Mapped[str] = mapped_column(String(128))
+    slug: Mapped[str | None] = mapped_column(String(160), nullable=True, unique=True)
+    profile_approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    languages: Mapped[list[str]] = mapped_column(JSON, default=list)
+    __table_args__ = (
+        Index("uq_membership_org_subject", "organization_id", "subject", unique=True),
+    )
+
+
+class LocationRecord(Base):
+    __tablename__ = "marketplace_locations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    city: Mapped[str] = mapped_column(String(64), index=True)
+    city_slug: Mapped[str] = mapped_column(String(64))
+    area: Mapped[str] = mapped_column(String(128), default="")
+    area_slug: Mapped[str] = mapped_column(String(128), default="")
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    sqft_per_marla: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    __table_args__ = (Index("uq_location_city_area", "city_slug", "area_slug", unique=True),)
+
+
+class ListingRevisionRecord(Base):
+    __tablename__ = "listing_revisions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    property_id: Mapped[str] = mapped_column(ForeignKey("properties.id"), index=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    proposed: Mapped[dict] = mapped_column(JSON)
+    base_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="submitted")
+    submitted_by: Mapped[str] = mapped_column(String(128))
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    review_note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_revision_submitted_property",
+            "property_id",
+            unique=True,
+            sqlite_where=text("status = 'submitted'"),
+            postgresql_where=text("status = 'submitted'"),
+        ),
+    )
+
+
+class AgentScheduleRecord(Base):
+    __tablename__ = "agent_schedules"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(128), index=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    weekday: Mapped[int] = mapped_column(Integer)
+    start_minute: Mapped[int] = mapped_column(Integer)
+    end_minute: Mapped[int] = mapped_column(Integer)
+    approved: Mapped[bool] = mapped_column(Boolean, default=False)
+    exception_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    unavailable: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ApplicationSessionRecord(Base):
+    __tablename__ = "application_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(128), index=True)
+    email: Mapped[str] = mapped_column(String(254))
+    assurance: Mapped[str] = mapped_column(String(8))
+    csrf_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class CustomerFavoriteRecord(Base):
+    __tablename__ = "customer_favorites"
+    subject: Mapped[str] = mapped_column(String(128), primary_key=True)
+    property_id: Mapped[str] = mapped_column(ForeignKey("properties.id"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class SavedSearchRecord(Base):
+    __tablename__ = "saved_searches"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(128), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    filters: Mapped[dict] = mapped_column(JSON)
+    notification_consent: Mapped[bool] = mapped_column(Boolean, default=False)
+    consent_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    activated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    unsubscribe_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unsubscribe_hash: Mapped[str] = mapped_column(String(64), unique=True)
+
+
+class MarketplaceAuditRecord(Base):
+    __tablename__ = "marketplace_audit"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    actor: Mapped[str] = mapped_column(String(128))
+    organization_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    action: Mapped[str] = mapped_column(String(64))
+    resource_id: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class ListingReportRecord(Base):
+    __tablename__ = "listing_reports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    property_id: Mapped[str] = mapped_column(ForeignKey("properties.id"), index=True)
+    category: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(20), default="new")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class AlertDeliveryRecord(Base):
+    __tablename__ = "alert_deliveries"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    search_id: Mapped[str] = mapped_column(ForeignKey("saved_searches.id"), index=True)
+    property_id: Mapped[str] = mapped_column(ForeignKey("properties.id"))
+    publication_key: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        Index(
+            "uq_alert_search_publication",
+            "search_id",
+            "property_id",
+            "publication_key",
+            unique=True,
+        ),
+    )
+
+
+class CustomerProfileRecord(Base):
+    __tablename__ = "customer_profiles"
+    subject: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email_ciphertext: Mapped[str] = mapped_column(Text)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MarketplaceRateRecord(Base):
+    __tablename__ = "marketplace_rate_windows"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window: Mapped[int] = mapped_column(Integer, primary_key=True)
+    hits: Mapped[int] = mapped_column(Integer)
+
+
+class ViewingOtpRecord(Base):
+    __tablename__ = "viewing_otp_challenges"
+    email_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)

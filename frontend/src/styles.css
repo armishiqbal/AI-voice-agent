@@ -1167,6 +1167,28 @@ svg {
   line-height: 1.55;
 }
 
+.assistant-task-starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.assistant-task-starters button {
+  padding: 7px 10px;
+  border: 1px solid rgba(56, 189, 248, 0.32);
+  border-radius: 999px;
+  color: #e0f2fe;
+  background: rgba(8, 21, 35, 0.88);
+  font-size: 11px;
+}
+
+.assistant-task-starters button:hover,
+.assistant-task-starters button:focus-visible {
+  border-color: var(--neon-cyan);
+  outline: none;
+}
+
 .conversation-empty-state {
   margin: 0;
   padding: 12px;
@@ -2941,6 +2963,32 @@ svg {
 
 /* Responsive adjustments */
 @media (max-width: 960px) {
+  .orbit-header {
+    min-height: 60px;
+    height: auto;
+    padding: 8px 16px;
+    gap: 8px 16px;
+    flex-wrap: wrap;
+  }
+  .orbit-brand { min-width: 0; }
+  .orbit-action-banner { flex: 1 1 220px; max-width: none; }
+  .orbit-header-tools {
+    min-width: 0;
+    max-width: 100%;
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+  .orbit-inventory-chip { min-width: 0; max-width: 140px; }
+  .orbit-inventory-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .orbit-inventory-compact { display: inline; }
   .orbit-center-stage {
     display: flex;
     padding: 12px;
@@ -3066,7 +3114,121 @@ svg {
   .orbit-inventory-chip { max-width: none; min-height: 32px; padding: 4px 5px; gap: 4px; font-size: 8px; }
   .orbit-inventory-chip svg { display: block; width: 13px; height: 13px; }
   .orbit-inventory-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .orbit-inventory-compact { display: inline; }
+.orbit-inventory-compact { display: inline; }
+}
+
+/* Property concierge layout: the conversation stays present and usable beside the voice controls. */
+.orbit-platform.has-conversation .orbit-center-stage { margin-right: min(59%, 980px); }
+.orbit-platform.has-conversation .orbit-bottom-dock { width: 41%; margin-left: 0; padding: 10px 14px; }
+.orbit-platform.has-conversation .orbit-floating-drawer {
+  top: 68px;
+  right: 14px;
+  bottom: 108px;
+  width: 57%;
+  max-width: none;
+  border-radius: 16px;
+  border: 1px solid #dbe5dd;
+  background: #fbfdfb;
+  box-shadow: 0 16px 44px rgba(10, 42, 29, 0.18);
+  color: #27382f;
+  animation: none;
+}
+.orbit-platform.has-conversation .drawer-bar-top {
+  min-height: 48px;
+  padding: 8px 14px;
+  border-color: #e6ede8;
+  background: #fff;
+}
+.orbit-platform.has-conversation .drawer-title-wrap { color: #205d43; }
+.orbit-platform.has-conversation .drawer-scroll-body { min-height: 0; padding: 14px; gap: 14px; }
+.orbit-platform.has-conversation .drawer-messages-list {
+  max-height: min(32dvh, 280px);
+  min-height: 110px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px;
+  border: 1px solid #e7eee9;
+  border-radius: 12px;
+  background: #f7faf8;
+}
+.orbit-platform.has-conversation .conversation-start-state { background: #fff; border-color: #e1ebe4; }
+.orbit-platform.has-conversation .conversation-start-eyebrow { color: #397657; }
+.orbit-platform.has-conversation .conversation-start-state p,
+.orbit-platform.has-conversation .bubble-text { color: #23342a; }
+.orbit-platform.has-conversation .conversation-start-state small { color: #64736a; }
+.orbit-platform.has-conversation .assistant-task-starters button { color: #245a40; background: #f0f7f2; border-color: #d1e3d6; }
+.orbit-platform.has-conversation .assistant-task-starters button:hover,
+.orbit-platform.has-conversation .assistant-task-starters button:focus-visible { border-color: #6b9a7b; }
+.orbit-platform.has-conversation .drawer-bubble.role-customer { background: #e6f2e9; border-color: #d2e6d7; color: #20372a; }
+.orbit-platform.has-conversation .drawer-bubble.role-agent { background: #fff; border-color: #e0e8e2; color: #26382e; }
+.orbit-platform.has-conversation .bubble-author { color: #286346; }
+.orbit-platform.has-conversation .bubble-time { color: #738078; }
+.orbit-platform.has-conversation .drawer-empty-state,
+.orbit-platform.has-conversation .conversation-empty-state { color: #53635a; border-color: #dce7df; }
+.orbit-platform.has-conversation .conversation-empty-state button { color: #245a40; background: #f0f7f2; border-color: #d1e3d6; }
+.orbit-platform.has-conversation .drawer-properties-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 235px), 1fr)); }
+.orbit-platform.has-conversation .drawer-property-item {
+  padding: 0;
+  overflow: hidden;
+  gap: 0;
+  border-color: #e0e9e2;
+  background: #fff;
+  box-shadow: 0 3px 14px rgba(27, 66, 44, 0.07);
+}
+.assistant-property-photo,
+.assistant-property-no-photo { width: 100%; height: 150px; object-fit: cover; background: #eef3ef; }
+.assistant-property-no-photo { display: grid; place-items: center; padding: 16px; color: #67756c; font-size: 12px; }
+.assistant-property-content { display: flex; flex-direction: column; gap: 7px; padding: 12px; }
+.orbit-platform.has-conversation .prop-id { color: #66766b; font-family: inherit; font-size: 10px; }
+.orbit-platform.has-conversation .prop-purpose { color: #286346; background: #eaf4ed; }
+.orbit-platform.has-conversation .prop-title { color: #1d3025; font-size: 15px; }
+.orbit-platform.has-conversation .prop-geo,
+.orbit-platform.has-conversation .prop-specs { color: #5c6b62; font-size: 12px; }
+.orbit-platform.has-conversation .prop-price { color: #205d43; font-size: 16px; }
+.orbit-platform.has-conversation .availability-badge { color: #315a41; background: #edf6ef; }
+.orbit-platform.has-conversation .assistant-verification-note { margin: 0; color: #617067; font-size: 11px; }
+.assistant-listing-link,
+.assistant-inquiry-link { color: #245d40; font-size: 12px; font-weight: 700; text-decoration: underline; }
+.assistant-inquiry-link { align-self: flex-start; padding: 5px 0; }
+.orbit-platform.has-conversation .prop-actions-row { flex-wrap: wrap; gap: 8px; }
+.orbit-platform.has-conversation .prop-book-action { margin: 0; background: #1f6747; }
+.assistant-match-notice { margin: 0; padding: 10px 12px; border-radius: 8px; background: #fff7e9; color: #714e15; font-size: 12px; }
+.assistant-conversation-composer { display: flex; gap: 8px; flex: 0 0 auto; padding: 12px; border-top: 1px solid #e3ebe5; background: #fff; }
+.assistant-conversation-composer input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid #d3ded6; border-radius: 10px; background: #fff; color: #24372c; }
+.assistant-conversation-composer input:focus-visible { outline: 3px solid #8bc5a0; outline-offset: 2px; }
+.assistant-conversation-composer button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 74px; padding: 0 13px; border-radius: 10px; background: #1f6747; color: #fff; font-weight: 700; }
+.assistant-inline-action { align-self: flex-start; color: #216443; font-size: 12px; font-weight: 700; text-decoration: underline; }
+.assistant-inline-status { color: #53635a; font-size: 12px; }
+.assistant-otp-row { display: flex; gap: 8px; }
+.assistant-otp-row input { flex: 1; min-width: 0; }
+.assistant-rollout-message { padding: 28px; border: 1px solid #dfe8e1; border-radius: 18px; background: #fff; }
+.assistant-rollout-message h2 { margin-top: 0; }
+
+@media (max-width: 960px) {
+  .orbit-platform.has-conversation .orbit-center-stage { margin-right: 0; flex: 0 0 130px; min-height: 130px; overflow: hidden; }
+  .orbit-platform.has-conversation .orbit-canvas-wrap,
+  .orbit-platform.has-conversation .neural-orb-canvas { width: 112px; height: 112px; }
+  .orbit-platform.has-conversation .orbit-bottom-dock { width: 100%; }
+  .orbit-platform.has-conversation .orbit-floating-drawer { top: 64px; right: 10px; bottom: calc(96px + env(safe-area-inset-bottom)); left: 10px; width: auto; height: auto; }
+  .orbit-platform.has-conversation .drawer-scroll-body { gap: 10px; }
+  .orbit-platform.has-conversation .drawer-messages-list { max-height: min(24dvh, 210px); min-height: 72px; }
+  .assistant-property-photo, .assistant-property-no-photo { height: 126px; }
+}
+@media (max-width: 540px) {
+  .orbit-platform.has-conversation .orbit-header { min-height: 58px; }
+  .orbit-platform.has-conversation .orbit-center-stage { flex-basis: 92px; min-height: 92px; padding: 4px; }
+  .orbit-platform.has-conversation .orbit-canvas-wrap,
+  .orbit-platform.has-conversation .neural-orb-canvas { width: 78px; height: 78px; }
+  .orbit-platform.has-conversation .orbit-floating-drawer { top: 60px; bottom: calc(104px + env(safe-area-inset-bottom)); right: 8px; left: 8px; }
+  .orbit-platform.has-conversation .drawer-bar-top { padding: 7px 10px; }
+  .orbit-platform.has-conversation .drawer-scroll-body { padding: 9px; }
+  .orbit-platform.has-conversation .drawer-properties-grid { grid-template-columns: 1fr; }
+  .orbit-platform.has-conversation .drawer-messages-list { max-height: 18dvh; min-height: 58px; padding: 7px; }
+  .orbit-platform.has-conversation .drawer-bubble { max-width: 100%; padding: 8px 10px; font-size: 12px; }
+  .assistant-conversation-composer { padding: 8px; }
+  .assistant-conversation-composer button { min-width: 48px; padding: 0 9px; }
+  .assistant-conversation-composer button span { display: none; }
+  .assistant-property-photo, .assistant-property-no-photo { height: 160px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3078,4 +3240,303 @@ svg {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+.assistant-recovery-panel { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px; border: 1px solid #e6c99a; border-radius: 10px; background: #fffaf0; color: #604816; font-size: 12px; }
+.assistant-recovery-panel p { flex: 1 1 100%; margin: 0; }
+.assistant-recovery-panel button, .assistant-recovery-panel a, .voice-error-notice a { color: #205d43; font-weight: 750; text-decoration: underline; }
+.orbit-status-chip[role="status"] { cursor: default; }
+
+/* Awaaz marketplace palette for the embedded voice assistant. */
+:root {
+  color-scheme: light;
+  color: #20342a;
+  background: #f4f7f4;
+  --bg-deep: #f4f7f4;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f7faf8;
+  --border-subtle: #dce6df;
+  --border-focus: #9bb8a3;
+  --accent-purple: #205d43;
+  --neon-purple: #205d43;
+  --neon-cyan: #4f7961;
+  --neon-green: #26845a;
+  --text-primary: #20342a;
+  --text-secondary: #5a6a60;
+  --text-dim: #78867d;
+}
+
+html,
+body,
+#root {
+  background: #f4f7f4;
+}
+
+.orbit-platform {
+  background: #f4f7f4;
+  color: #20342a;
+}
+
+.orbit-header {
+  border-bottom-color: #e2e9e4;
+  background: #ffffff;
+  backdrop-filter: none;
+}
+
+.orbit-logo-crest {
+  background: #205d43;
+  box-shadow: none;
+  border-color: #205d43;
+}
+
+.orbit-brand-title { color: #20342a; }
+
+.orbit-version-badge {
+  background: #edf5ef;
+  color: #205d43;
+  border-color: #d9e8dc;
+}
+
+.orbit-action-banner,
+.orbit-inventory-chip,
+.orbit-icon-btn,
+.orbit-status-chip {
+  background: #f7faf8;
+  border-color: #dce6df;
+  box-shadow: none;
+}
+
+.orbit-action-text { color: #40564a; }
+.orbit-action-indicator { background: #82968a; box-shadow: none; }
+.orbit-action-indicator.live { background: #26845a; box-shadow: none; }
+.orbit-icon-btn { color: #5a6a60; }
+.orbit-icon-btn:hover { color: #205d43; background: #edf5ef; border-color: #b8d0bf; }
+.orbit-status-chip { color: #5a6a60; }
+.orbit-status-chip.ready { color: #597461; }
+.orbit-status-chip.ready .status-dot { background: #82968a; box-shadow: none; }
+.orbit-status-chip.live { color: #205d43; }
+.orbit-status-chip.live .status-dot { background: #26845a; box-shadow: none; }
+.orbit-status-chip.error, .orbit-status-chip.offline { color: #9a3e34; }
+.orbit-status-chip.error .status-dot, .orbit-status-chip.offline .status-dot { background: #b54735; box-shadow: none; }
+
+.orbit-center-stage {
+  background: #f4f7f4;
+}
+
+.orbit-canvas-wrap {
+  background: #eef4ef;
+}
+
+.neural-orb-container:focus-visible {
+  outline-color: #6d9b7b;
+}
+
+.orbit-state-pill,
+.voice-diagnostics,
+.voice-reasoning-warning,
+.voice-readiness-notice {
+  border-color: #dce6df;
+  background: #ffffff;
+  color: #40564a;
+  box-shadow: 0 4px 16px rgba(31, 74, 49, 0.06);
+  backdrop-filter: none;
+}
+
+.orbit-state-pill { color: #5a6a60; }
+.orbit-state-pill.phase-listening,
+.orbit-state-pill.phase-transcribing,
+.orbit-state-pill.phase-thinking,
+.orbit-state-pill.phase-speaking { color: #205d43; border-color: #bfd5c5; box-shadow: none; }
+.orbit-state-pill.phase-error { color: #9a3e34; border-color: #e5c3bd; }
+.voice-reasoning-warning { color: #604816; background: #fffaf0; border-color: #ecd9b2; text-align: left; }
+.voice-reasoning-warning strong { color: #795819; }
+.voice-readiness-notice { border-color: #ecd9b2; background: #fffaf0; color: #604816; }
+.voice-readiness-notice strong { color: #795819; }
+.voice-readiness-notice p, .voice-readiness-notice ul { color: #6d6047; }
+.voice-readiness-notice summary { color: #795819; }
+.voice-readiness-actions button { border-color: #d8dfd9; background: #fff; color: #40564a; }
+.voice-readiness-actions button:first-child { border-color: #e1cda5; color: #795819; }
+.voice-diagnostics-summary { color: #40564a; }
+.voice-diagnostics-summary-state { color: #78867d; }
+.voice-diagnostics-summary::after { color: #4f7961; }
+.voice-diagnostic-copy strong { color: #20342a; }
+.voice-diagnostic-copy small { color: #78867d; }
+
+.orbit-bottom-dock {
+  border-top: 1px solid #e2e9e4;
+  background: #ffffff;
+  box-shadow: 0 -8px 24px rgba(31, 74, 49, 0.04);
+}
+
+.dock-action-pill,
+.dock-asr-pill {
+  color: #40564a;
+  background: #f7faf8;
+  border-color: #dce6df;
+  backdrop-filter: none;
+}
+
+.dock-action-pill:hover,
+.dock-action-pill.active {
+  color: #205d43;
+  background: #edf5ef;
+  border-color: #b8d0bf;
+  box-shadow: none;
+}
+
+.dock-count-badge { background: #dcecdf; color: #205d43; }
+.dock-asr-pill { color: #78867d; font-family: inherit; }
+.dock-asr-pill.live { color: #205d43; border-color: #bfd5c5; }
+.dock-asr-pill.live .asr-led { background: #26845a; box-shadow: none; }
+
+.dock-call-pill {
+  color: #ffffff;
+  background: #205d43;
+  border-color: #205d43;
+  box-shadow: 0 4px 14px rgba(32, 93, 67, 0.18);
+}
+
+.dock-call-pill:hover { background: #194d37; box-shadow: 0 5px 18px rgba(32, 93, 67, 0.22); }
+.dock-call-pill.in-call { background: #9a3e34; border-color: #9a3e34; box-shadow: none; }
+
+.assistant-conversation-composer { background: #fff; }
+.assistant-conversation-composer button { background: #205d43; }
+.assistant-conversation-composer input:focus-visible { outline-color: #6d9b7b; }
+
+.voice-error-notice { color: #813d34; background: #fff6f4; border-color: #e5c3bd; box-shadow: none; }
+.voice-error-notice > button { color: #813d34; background: #fff; border-color: #ddb1a9; }
+.voice-error-notice > button:hover { color: #722e25; border-color: #b76559; }
+.barge-in-btn { color: #813d34; background: #fff6f4; border-color: #ddb1a9; box-shadow: none; backdrop-filter: none; }
+.barge-in-ring { background: #b54735; box-shadow: none; }
+
+.orbit-native-modal::backdrop,
+.orbit-booking-dialog::backdrop { background: rgba(22, 42, 30, 0.48); backdrop-filter: blur(4px); }
+.orbit-modal-window,
+.orbit-booking-dialog {
+  border-color: #dce6df;
+  background: #ffffff;
+  color: #20342a;
+  box-shadow: 0 20px 54px rgba(24, 55, 36, 0.2);
+}
+.modal-top h3,
+.dialog-title-wrap h2 { color: #20342a; }
+.form-row label,
+.field-block label,
+.dialog-info,
+.appointment-consent-field,
+.settings-value { color: #5a6a60; }
+.form-row select,
+.field-block input,
+.dialog-select-input,
+.analytics-access input {
+  color: #20342a;
+  background: #f7faf8;
+  border-color: #dce6df;
+}
+.form-row select option { color: #20342a; background: #ffffff; }
+.save-btn,
+.dialog-confirm-action,
+.analytics-access button,
+.analytics-toolbar button { background: #205d43; box-shadow: none; }
+.save-btn:hover,
+.dialog-confirm-action:hover { background: #194d37; }
+
+/* Keep the voice control and conversation visible together on tablet and mobile. */
+@media (max-width: 960px) {
+  .orbit-platform.has-conversation .orbit-center-stage {
+    flex: 0 0 132px;
+    min-height: 132px;
+    overflow: visible;
+    padding: 4px 14px;
+  }
+
+  .orbit-platform.has-conversation .orbit-core-view {
+    width: 100%;
+    min-width: 0;
+    flex-direction: row;
+    justify-content: center;
+    gap: 16px;
+  }
+
+  .orbit-platform.has-conversation .orbit-canvas-wrap,
+  .orbit-platform.has-conversation .neural-orb-canvas {
+    width: 112px;
+    height: 112px;
+  }
+
+  .orbit-platform.has-conversation .orbit-state-overlay {
+    width: min(100%, 420px);
+    max-width: 420px;
+    margin: 0;
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .orbit-platform.has-conversation .orbit-state-pill {
+    width: auto;
+    max-width: 100%;
+    text-align: left;
+  }
+
+  .orbit-platform.has-conversation .voice-live-transcript {
+    text-align: left;
+  }
+
+  .orbit-platform.has-conversation .orbit-bottom-dock {
+    position: relative;
+    width: 100%;
+    min-height: 62px;
+    margin: 0;
+    padding: 7px 12px;
+  }
+
+  .orbit-platform.has-conversation .orbit-dock-pill-bar {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .orbit-platform.has-conversation .orbit-floating-drawer {
+    position: relative;
+    inset: auto;
+    flex: 1 1 0;
+    width: calc(100% - 16px);
+    min-width: 0;
+    min-height: 120px;
+    max-width: none;
+    max-height: none;
+    height: auto;
+    margin: 4px 8px 8px;
+    z-index: 25;
+  }
+
+  .orbit-platform.has-conversation .drawer-scroll-body {
+    min-height: 0;
+    max-height: none;
+  }
+
+  .orbit-platform.has-conversation .drawer-messages-list {
+    max-height: min(30dvh, 260px);
+    min-height: 62px;
+  }
+}
+
+@media (max-width: 540px) {
+  .orbit-platform.has-conversation .orbit-center-stage {
+    flex-basis: 98px;
+    min-height: 98px;
+    padding: 2px 10px;
+  }
+
+  .orbit-platform.has-conversation .orbit-core-view { gap: 10px; }
+  .orbit-platform.has-conversation .orbit-canvas-wrap,
+  .orbit-platform.has-conversation .neural-orb-canvas { width: 82px; height: 82px; }
+  .orbit-platform.has-conversation .orbit-state-overlay { gap: 4px; }
+  .orbit-platform.has-conversation .orbit-state-pill { padding: 5px 9px; font-size: 10px; }
+  .orbit-platform.has-conversation .orbit-bottom-dock { min-height: 58px; padding: 5px 8px; }
+  .orbit-platform.has-conversation .orbit-dock-pill-bar { justify-content: flex-start; }
+  .orbit-platform.has-conversation .orbit-floating-drawer { margin: 2px 6px 6px; width: calc(100% - 12px); }
+  .orbit-platform.has-conversation .drawer-messages-list { max-height: min(34dvh, 230px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit-action-indicator.live { animation: none; }
 }

@@ -11,7 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from app.agents.prompts import answer_prompt, general_qa_prompt, recommendation_prompt
 from app.core.observability import TraceStore
 from app.domain.legal import verify_legal_status
-from app.domain.models import AgentDecision, Intent, PropertyQuery
+from app.domain.models import AgentAction, AgentDecision, Intent, PropertyQuery
 from app.domain.scoring import score_lead
 from app.domain.taxes import explain_tax_query
 from app.domain.units import explain_land_conversion, parse_land_size
@@ -103,6 +103,7 @@ class EstateAgent:
             "cancel",
             "handoff",
             "goodbye",
+            "execute_action",
         ):
             builder.add_node(route_name, self._route_node)
         builder.add_edge(START, "guardrails")
@@ -128,6 +129,7 @@ class EstateAgent:
                     "cancel",
                     "handoff",
                     "goodbye",
+                    "execute_action",
                 )
             },
         )
@@ -141,6 +143,7 @@ class EstateAgent:
             "cancel",
             "handoff",
             "goodbye",
+            "execute_action",
         ):
             builder.add_edge(route_name, END)
         self.graph = builder.compile()
@@ -508,6 +511,145 @@ class EstateAgent:
                 return area
         return None
 
+    def _extract_mortgage_action(self, text: str, state: ConversationState) -> AgentAction | None:
+        lowered = text.lower()
+        mortgage_keywords = (
+            "mortgage", "installment", "installments", "kist", "kisht", "loan",
+            "down payment", "monthly payment", "finance", "musharakah", "financing",
+            "home finance", "diminishing musharakah", "emi", "calculate mortgage",
+            "calculate installment", "monthly kist"
+        )
+        if not any(k in lowered for k in mortgage_keywords):
+            return None
+
+        budget = EstateAgent._extract_budget(lowered)
+        if budget is None and state.selected_property_ids:
+            selected = self.properties.get_available(state.selected_property_ids[0])
+            budget = selected.price_pkr if selected is not None else None
+        if budget is None:
+            return None
+
+        down_match = re.search(r"(\d+)\s*(?:%|percent|prcnt)", lowered)
+        if not down_match:
+            down_match = re.search(r"(\d+)\s*(?:down|peshgi)", lowered)
+        down_pct = int(down_match.group(1)) if down_match else 25
+        down_pct = max(10, min(80, down_pct))
+
+        tenure_match = re.search(r"(\d+)\s*(?:saal|years?|yr|yrs)", lowered)
+        tenure_years = int(tenure_match.group(1)) if tenure_match else 20
+        tenure_years = max(1, min(30, tenure_years))
+
+        finance_type = "unspecified"
+        if "conventional" in lowered or "sood" in lowered or "interest" in lowered:
+            finance_type = "conventional"
+        elif "musharakah" in lowered or "islamic" in lowered:
+            finance_type = "diminishing_musharakah"
+
+        loan_amount = budget * (1 - (down_pct / 100))
+        summary = f"Opened the installment estimator for {budget:,} PKR ({down_pct}% down, {tenure_years} yrs). Confirm the editable rate in the calculator."
+        return AgentAction(
+            kind="calculate_mortgage",
+            payload={
+                "property_price_pkr": budget,
+                "down_payment_pct": down_pct,
+                "tenure_years": tenure_years,
+                "finance_type": finance_type,
+                "loan_amount_pkr": int(loan_amount),
+            },
+            summary=summary,
+            executed=True,
+        )
+
+    @staticmethod
+    def _extract_shortlist_action(text: str, state: ConversationState) -> AgentAction | None:
+        lowered = text.lower()
+        shortlist_keywords = (
+            "shortlist", "favorite", "favourite", "save this", "save property",
+            "save to shortlist", "add to shortlist", "add to favorite", "add to favorites",
+            "shortlist mein", "save kar", "pasand aayi", "pasand hai", "bookmark",
+            "shortlist kar", "save option", "save first", "save second", "save the first",
+            "save the second", "add the first option", "add the second option"
+        )
+        if not any(k in lowered for k in shortlist_keywords):
+            return None
+
+        is_remove = any(w in lowered for w in ("remove", "delete", "hata", "nikal", "drop", "hatao"))
+        action_type = "remove" if is_remove else "add"
+
+        prop_id = None
+        prop_match = re.search(r"\b(prop-\d+|isl-\d+|khi-\d+|lhr-\d+)\b", lowered)
+        if prop_match:
+            prop_id = prop_match.group(1).upper()
+        elif any(w in lowered for w in ("first", "pehli", "option 1", "pehla")):
+            if state.selected_property_ids:
+                prop_id = state.selected_property_ids[0]
+        elif any(w in lowered for w in ("second", "doosri", "option 2", "doosra")):
+            if len(state.selected_property_ids) > 1:
+                prop_id = state.selected_property_ids[1]
+        elif state.selected_property_ids:
+            prop_id = state.selected_property_ids[0]
+
+        if not prop_id:
+            return None
+
+        summary = f"{'Saved' if action_type == 'add' else 'Removed'} {prop_id} {'to' if action_type == 'add' else 'from'} shortlist"
+        return AgentAction(
+            kind="shortlist_property",
+            payload={
+                "property_id": prop_id,
+                "action": action_type,
+            },
+            summary=summary,
+            executed=True,
+        )
+
+    @staticmethod
+    def _extract_compare_action(text: str, state: ConversationState) -> AgentAction | None:
+        lowered = _normalize_voice_text(text)
+        compare_requested = any(
+            marker in lowered
+            for marker in ("compare", "comparison", "side by side", "side-by-side", "muqabla", "farq batao")
+        )
+        if not compare_requested:
+            return None
+        property_ids = state.selected_property_ids[:3]
+        if len(property_ids) < 2:
+            return AgentAction(
+                kind="compare_properties",
+                payload={"property_ids": property_ids, "needs_search": True},
+                summary="A search needs at least two available listings before they can be compared.",
+                executed=False,
+            )
+        return AgentAction(
+            kind="compare_properties",
+            payload={"property_ids": property_ids},
+            summary=f"Opened a side-by-side comparison of {len(property_ids)} available listings.",
+            executed=True,
+        )
+
+    @staticmethod
+    def _extract_navigation_action(text: str) -> AgentAction | None:
+        lowered = text.lower()
+        nav_targets = (
+            (("catalog", "properties", "listings", "all properties", "explore"), "/catalog", "Property Catalog"),
+            (("calculator", "finance", "mortgage calculator", "loan calculator"), "/calculator", "Home Finance Calculator"),
+            (("contact", "appointments", "book visit", "agent contact"), "/contact", "Contact & Appointments"),
+            (("home", "homepage", "main page"), "/", "Home"),
+        )
+        is_nav = any(w in lowered for w in ("go to", "open", "show me", "take me to", "navigate to", "kholo", "dikhao", "par jao"))
+        if not is_nav:
+            return None
+
+        for keywords, path, label in nav_targets:
+            if any(k in lowered for k in keywords):
+                return AgentAction(
+                    kind="navigate_to",
+                    payload={"path": path, "label": label},
+                    summary=f"Navigated to {label} ({path})",
+                    executed=True,
+                )
+        return None
+
     @staticmethod
     def _is_greeting(text: str) -> bool:
         tokens = set(re.findall(r"[a-z']+", text))
@@ -524,6 +666,41 @@ class EstateAgent:
             or "allah hafiz" in text
             or "khuda hafiz" in text
         )
+
+    @staticmethod
+    def _unknown_request_reply(
+        text: str, language: str, has_previous_dialogue: bool
+    ) -> str:
+        """Give a useful, language-matched recovery when no model can resolve a turn."""
+        lowered = _normalize_voice_text(text)
+        asks_what_we_do = any(
+            phrase in lowered
+            for phrase in (
+                "kya kya", "aap kya karte", "aap kya kar sakte", "kya madad",
+                "what all", "what can you do", "what do you do", "how can you help",
+                "what can you help",
+            )
+        ) or any(phrase in text for phrase in ("کیا کیا", "آپ کیا", "کیا مدد"))
+
+        if asks_what_we_do:
+            if language == "ur-Arab" or any("\u0600" <= char <= "\u06ff" for char in text):
+                return "میں خریدنے یا کرائے کے لیے گھر، فلیٹ، پلاٹ یا کمرشل پراپرٹی تلاش کرنے، لسٹنگ کی تفصیل بتانے اور وزٹ کی درخواست میں مدد کر سکتا ہوں۔ آپ کس شہر اور کس قسم کی پراپرٹی دیکھ رہے ہیں؟"
+            if language == "ur-Latn":
+                return "Main ghar, flat, plot ya commercial property buy ya rent par dhoondhne, listing details samjhane aur viewing request mein madad kar sakta hoon. Aap kis shehar mein kya dekh rahe hain?"
+            return "I can help find homes, plots, apartments, or commercial spaces to buy or rent, explain listing details, and request a viewing. Which city and property type are you interested in?"
+
+        if has_previous_dialogue:
+            if language == "ur-Arab" or any("\u0600" <= char <= "\u06ff" for char in text):
+                return "معذرت، آپ کا مطلب واضح نہیں ہوا۔ کیا آپ پراپرٹی تلاش کرنے، کسی لسٹنگ کی تفصیل، یا وزٹ کے بارے میں پوچھ رہے ہیں؟"
+            if language == "ur-Latn":
+                return "Maazrat, aap ka matlab clear nahi hua. Kya aap property search, kisi listing ki details, ya viewing ke baare mein pooch rahe hain?"
+            return "I’m not sure which part you mean. Are you asking about finding a property, details on a listing, or arranging a viewing?"
+
+        if language == "ur-Arab":
+            return "میں پراپرٹی لسٹنگز، ان کی تفصیل اور وزٹ میں مدد کر سکتا ہوں۔ آپ کس چیز کے بارے میں جاننا چاہتے ہیں؟"
+        if language == "ur-Latn":
+            return "Main property listings, unki details aur viewing mein madad kar sakta hoon. Aap kis cheez ke baare mein jaanna chahte hain?"
+        return "I can help with property listings, their details, and viewings. What would you like to know?"
 
     @staticmethod
     def _empty_inventory_reply(state: ConversationState) -> str:
@@ -571,8 +748,8 @@ class EstateAgent:
             {"conversation_id": conversation_id, "text": text, "language": language}
         )
         decision = result["decision"]
-        # Greeting, goodbye and guardrail routes also belong to durable dialogue.
-        if result.get("blocked") or result.get("route") in {"greeting", "goodbye"}:
+        # Greeting, goodbye, guardrail, and action routes also belong to durable dialogue.
+        if result.get("blocked") or result.get("route") in {"greeting", "goodbye", "execute_action"}:
             state = self._load_state(conversation_id)
             state.history.append(f"Caller: {redact_for_retention(text)}")
             self._finish(conversation_id, state, decision)
@@ -733,12 +910,121 @@ class EstateAgent:
         if state.intent in (Intent.BOOK, Intent.RESCHEDULE, Intent.CANCEL):
             state.appointment_status = "pending_confirmation"
             action = "book" if state.intent == Intent.BOOK else state.intent.value
+            viewing_actions = [
+                AgentAction(
+                    kind="schedule_viewing",
+                    payload={"property_id": state.selected_property_ids[0] if state.selected_property_ids else ""},
+                    summary="Opened the viewing request form. The visit is not booked until you confirm a slot and consented contact details.",
+                    executed=True,
+                )
+            ] if state.intent == Intent.BOOK else []
             return self._finish(
                 conversation_id,
                 state,
                 AgentDecision(
                     kind=action,
                     spoken_text="Ji bilkul. Appointment form mein reference aur consented contact details confirm kar dein, phir main verified slot process karunga.",
+                    property_ids=state.selected_property_ids[:1] if state.selected_property_ids else [],
+                    actions=viewing_actions,
+                ),
+            )
+
+        compare_action = self._extract_compare_action(text, state)
+        if compare_action is not None:
+            if not compare_action.executed:
+                return self._finish(conversation_id, state, AgentDecision(
+                    kind="ask_clarification",
+                    spoken_text="I need at least two current listings first. Tell me a city, area, or budget and I’ll search, then compare the available options.",
+                ))
+            property_ids = [str(item) for item in compare_action.payload["property_ids"]]
+            return self._finish(conversation_id, state, AgentDecision(
+                kind="execute_action",
+                spoken_text=f"I found {len(property_ids)} current options from your last search. I’ve opened them side by side so you can compare price, size, and details.",
+                property_ids=property_ids,
+                actions=[compare_action],
+            ))
+
+        mortgage_action = self._extract_mortgage_action(text, state)
+        mortgage_markers = (
+            "mortgage", "installment", "installments", "kist", "kisht", "loan",
+            "down payment", "monthly payment", "finance", "musharakah", "financing",
+            "home finance", "diminishing musharakah", "emi", "calculate mortgage",
+            "calculate installment", "monthly kist",
+        )
+        if any(marker in lowered for marker in mortgage_markers) and mortgage_action is None:
+            return self._finish(conversation_id, state, AgentDecision(
+                kind="ask_clarification",
+                spoken_text="I can open the installment estimator. Which property should I use, or what is its price in PKR? I won’t assume a price or financing rate.",
+            ))
+        if mortgage_action is not None:
+            price = mortgage_action.payload["property_price_pkr"]
+            down = mortgage_action.payload["down_payment_pct"]
+            tenure = mortgage_action.payload["tenure_years"]
+            if language == "ur-Arab":
+                spoken = f"جی، {price:,} روپے کے پراپرٹی بجٹ، {down} فیصد ڈاؤن پیمنٹ اور {tenure} سال کے لیے قسط کا تخمینہ کیلکولیٹر میں کھول دیا ہے۔ شرح وہاں دیکھی اور تبدیل کی جا سکتی ہے۔"
+            elif language == "ur-Latn":
+                spoken = f"Ji, {price:,} PKR property price, {down}% down payment aur {tenure} saal ke liye installment estimate khol diya hai. Rate calculator mein dekh aur change kar sakte hain."
+            else:
+                spoken = f"I opened the installment estimator for a PKR {price:,} property, with {down}% down over {tenure} years. Review or change the rate in the calculator before relying on the estimate."
+            return self._finish(
+                conversation_id,
+                state,
+                AgentDecision(
+                    kind="execute_action",
+                    spoken_text=spoken,
+                    actions=[mortgage_action],
+                ),
+            )
+
+        shortlist_action = self._extract_shortlist_action(text, state)
+        shortlist_markers = (
+            "shortlist", "favorite", "favourite", "save this", "save property",
+            "save to shortlist", "add to shortlist", "add to favorite", "add to favorites",
+            "shortlist mein", "save kar", "pasand aayi", "pasand hai", "bookmark",
+            "shortlist kar", "save option", "save first", "save second", "save the first",
+            "save the second", "add the first option", "add the second option",
+        )
+        if any(marker in lowered for marker in shortlist_markers) and shortlist_action is None:
+            return self._finish(conversation_id, state, AgentDecision(
+                kind="ask_clarification",
+                spoken_text="I need a current listing to save. Search for properties first, or tell me the property reference.",
+            ))
+        if shortlist_action is not None:
+            is_add = shortlist_action.payload["action"] == "add"
+            prop_id = shortlist_action.payload["property_id"]
+            if language == "ur-Arab":
+                spoken = f"جی بالکل، میں نے یہ پراپرٹی آپ کی شارٹ لسٹ میں {'محفوظ کر دی ہے' if is_add else 'سے ہٹا دی ہے'}۔"
+            elif language == "ur-Latn":
+                spoken = f"Ji bilkul, maine yeh property aap ki shortlist {'mein save kar di hai' if is_add else 'se remove kar di hai'}. Header mein Saved counter update ho gaya hai."
+            else:
+                spoken = f"Done! I have {'added this property to' if is_add else 'removed this property from'} your shortlist. Your saved listings counter has been updated."
+            return self._finish(
+                conversation_id,
+                state,
+                AgentDecision(
+                    kind="execute_action",
+                    spoken_text=spoken,
+                    property_ids=[prop_id] if prop_id != "CURRENT_PROPERTY" else (state.selected_property_ids[:1] if state.selected_property_ids else []),
+                    actions=[shortlist_action],
+                ),
+            )
+
+        nav_action = self._extract_navigation_action(text)
+        if nav_action is not None:
+            label = nav_action.payload["label"]
+            if language == "ur-Arab":
+                spoken = f"جی ضرور، میں آپ کو {label} پیج پر لے چلتا ہوں۔"
+            elif language == "ur-Latn":
+                spoken = f"Ji zaroor, main aap ko {label} page par le chalta hoon."
+            else:
+                spoken = f"Certainly, navigating to {label} now."
+            return self._finish(
+                conversation_id,
+                state,
+                AgentDecision(
+                    kind="execute_action",
+                    spoken_text=spoken,
+                    actions=[nav_action],
                 ),
             )
         detail = self._property_detail_answer(state, text)
@@ -994,6 +1280,21 @@ class EstateAgent:
                 property_ids=[p.id for p in chosen],
                 source_ids=source_ids[:5],
                 spoken_text=f"Ji bilkul. Verified available options hain: {names}. Aap visit book karna chahenge ya kisi ek option ki details sunna chahenge?",
+                actions=[
+                    AgentAction(
+                        kind="filter_catalog",
+                        payload={
+                            "city": state.city,
+                            "area": state.area,
+                            "max_price": state.budget,
+                            "bedrooms": state.bedrooms,
+                            "purpose": purpose,
+                            "count": len(matches),
+                        },
+                        summary=f"Filtered catalog: {len(matches)} listings matched in {state.city or 'all cities'}",
+                        executed=True,
+                    )
+                ],
             )
             return self._finish(
                 conversation_id,
@@ -1010,7 +1311,9 @@ class EstateAgent:
             state,
             AgentDecision(
                 kind="ask_clarification",
-                spoken_text="Assalam-o-Alaikum. Main verified property options aur visits mein help karta hoon. Aap buy, rent, commercial, ya investment ke liye dekh rahe hain?",
+                spoken_text=self._unknown_request_reply(
+                    text, language, bool(previous_dialogue)
+                ),
             ),
         )
 
@@ -1173,6 +1476,7 @@ class EstateAgent:
             update={
                 "property_ids": [allowed_property_id],
                 "source_ids": source_ids or fallback.source_ids,
+                "actions": candidate.actions or fallback.actions,
             }
         )
 
@@ -1208,5 +1512,6 @@ class EstateAgent:
             update={
                 "property_ids": property_ids[: len(properties)],
                 "source_ids": source_ids or fallback.source_ids,
+                "actions": candidate.actions or fallback.actions,
             }
         )

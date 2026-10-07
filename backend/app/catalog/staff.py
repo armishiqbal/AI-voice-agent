@@ -5,16 +5,23 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from typing import Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import func, select, update
 
 from app.catalog.staff_auth import StaffPrincipal, require_roles, require_staff
+from app.core.config import settings
+from app.core.pii import ContactCipher
+from app.domain.models import AppointmentUpdate
+from app.repositories.appointments import SqlAppointmentService
 from app.repositories.database import SessionLocal
 from app.repositories.listing_visibility import AVAILABILITY_CONFIRMATION_MAX_AGE
+from app.repositories.properties import SqlPropertyRepository
 from app.repositories.records import (
+    AppointmentRecord,
+    AreaGuideRecord,
     PropertyMediaRecord,
     PropertyRecord,
     StaffUserRecord,
@@ -22,9 +29,7 @@ from app.repositories.records import (
 )
 
 StaffTransactionType = Literal["sale", "rent"]
-StaffPropertyType = Literal[
-    "house", "apartment", "plot", "shop", "office", "warehouse", "other"
-]
+StaffPropertyType = Literal["house", "apartment", "plot", "shop", "office", "warehouse", "other"]
 StaffAvailability = Literal["available", "unavailable", "reserved", "sold"]
 
 
@@ -200,9 +205,10 @@ def list_staff_listings(
     if staff.role == "agent":
         statement = statement.where(PropertyRecord.assigned_staff_id == staff.subject)
     with SessionLocal() as session:
-        total = session.scalar(
-            select(func.count()).select_from(statement.order_by(None).subquery())
-        ) or 0
+        total = (
+            session.scalar(select(func.count()).select_from(statement.order_by(None).subquery()))
+            or 0
+        )
         records = session.scalars(
             statement.order_by(PropertyRecord.imported_at.desc(), PropertyRecord.id.asc())
             .offset((page - 1) * page_size)
@@ -418,6 +424,8 @@ def publish_staff_listing(
         record = session.get(PropertyRecord, property_id, with_for_update=True)
         if record is None:
             raise HTTPException(status_code=404, detail="Listing was not found")
+        if settings.marketplace_enabled:
+            raise HTTPException(409, "Marketplace listings must use revision moderation")
         if record.edit_version != payload.edit_version:
             raise HTTPException(status_code=409, detail="Listing changed; reload before publishing")
         assigned = (
@@ -425,15 +433,20 @@ def publish_staff_listing(
             if record.assigned_staff_id
             else None
         )
-        photo_count = session.scalar(
-            select(func.count()).select_from(PropertyMediaRecord).where(
-                PropertyMediaRecord.property_id == property_id,
-                PropertyMediaRecord.is_public.is_(True),
-                PropertyMediaRecord.processing_status == "ready",
-                PropertyMediaRecord.derivative_object_path.is_not(None),
-                PropertyMediaRecord.public_url.is_not(None),
+        photo_count = (
+            session.scalar(
+                select(func.count())
+                .select_from(PropertyMediaRecord)
+                .where(
+                    PropertyMediaRecord.property_id == property_id,
+                    PropertyMediaRecord.is_public.is_(True),
+                    PropertyMediaRecord.processing_status == "ready",
+                    PropertyMediaRecord.derivative_object_path.is_not(None),
+                    PropertyMediaRecord.public_url.is_not(None),
+                )
             )
-        ) or 0
+            or 0
+        )
         confirmed_at = record.availability_confirmed_at
         if confirmed_at and confirmed_at.tzinfo is None:
             confirmed_at = confirmed_at.replace(tzinfo=UTC)
@@ -442,9 +455,8 @@ def publish_staff_listing(
                 record.title.strip(),
                 len(record.description.strip()) >= 40,
                 record.transaction_type in {"sale", "rent"},
-                record.property_type in {
-                    "house", "apartment", "plot", "shop", "office", "warehouse", "other"
-                },
+                record.property_type
+                in {"house", "apartment", "plot", "shop", "office", "warehouse", "other"},
                 record.city.strip(),
                 record.area.strip(),
                 record.price_pkr > 0,
@@ -452,7 +464,8 @@ def publish_staff_listing(
                 record.content_permission_confirmed_at is not None,
                 assigned is not None and assigned.is_active,
                 record.assigned_employee.strip(),
-                confirmed_at is not None and confirmed_at >= now - AVAILABILITY_CONFIRMATION_MAX_AGE,
+                confirmed_at is not None
+                and confirmed_at >= now - AVAILABILITY_CONFIRMATION_MAX_AGE,
                 record.availability_status in {"available", "unavailable", "reserved", "sold"},
                 photo_count > 0,
             )
@@ -513,3 +526,304 @@ def archive_staff_listing(
         session.flush()
         result_dto = _staff_listing(session, session.get(PropertyRecord, property_id))
     return StaffSlugResponse(data=result_dto)
+
+
+_appointment_service = SqlAppointmentService(SqlPropertyRepository())
+
+
+class StaffViewing(BaseModel):
+    id: str
+    reference: str
+    property_id: str
+    property_title: str | None
+    employee: str
+    starts_at: datetime
+    client_name: str
+    contact_email: EmailStr | None
+    contact_phone: str | None
+    status: str
+    delivery_status: str
+
+
+class StaffViewingPage(BaseModel):
+    data: list[StaffViewing]
+    pagination: dict[str, int]
+
+
+class StaffViewingCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: UUID
+    reason: str = Field(default="", max_length=500)
+
+
+class StaffViewingReschedule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: UUID
+    new_starts_at: datetime
+
+
+staff_viewings_router = APIRouter(prefix="/v1/staff/viewings", tags=["staff viewings"])
+
+
+def _to_staff_viewing(session, record: AppointmentRecord) -> StaffViewing:
+    cipher = ContactCipher()
+    try:
+        email = (
+            cipher.decrypt(record.contact_email_ciphertext)
+            if record.contact_email_ciphertext
+            else None
+        )
+    except Exception:  # noqa: BLE001 - expired viewing contacts are intentionally erased
+        email = None
+    try:
+        phone = (
+            cipher.decrypt(record.contact_phone_ciphertext)
+            if record.contact_phone_ciphertext
+            else None
+        )
+    except Exception:  # noqa: BLE001 - expired viewing contacts are intentionally erased
+        phone = None
+    prop = session.get(PropertyRecord, record.property_id)
+    prop_title = prop.title if prop else None
+    delivery_status = "not_configured"
+    if settings.google_token_path or settings.n8n_webhook_url:
+        delivery_status = "delivered" if record.status in {"booked", "cancelled"} else "pending"
+    return StaffViewing(
+        id=record.id,
+        reference=record.reference,
+        property_id=record.property_id,
+        property_title=prop_title,
+        employee=record.employee,
+        starts_at=record.starts_at
+        if record.starts_at.tzinfo
+        else record.starts_at.replace(tzinfo=UTC),
+        client_name=record.client_name,
+        contact_email=email,
+        contact_phone=phone,
+        status=record.status,
+        delivery_status=delivery_status,
+    )
+
+
+@staff_viewings_router.get("", response_model=StaffViewingPage)
+def list_staff_viewings(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    status: str | None = None,
+    property_id: str | None = None,
+    staff: StaffPrincipal = Depends(require_staff),
+) -> StaffViewingPage:
+    statement = select(AppointmentRecord)
+    if status:
+        statement = statement.where(AppointmentRecord.status == status)
+    if property_id:
+        statement = statement.where(AppointmentRecord.property_id == property_id)
+    if staff.role == "agent":
+        statement = statement.where(AppointmentRecord.employee == staff.display_name)
+    with SessionLocal() as session:
+        total = (
+            session.scalar(select(func.count()).select_from(statement.order_by(None).subquery()))
+            or 0
+        )
+        records = session.scalars(
+            statement.order_by(AppointmentRecord.starts_at.desc(), AppointmentRecord.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        ).all()
+        data = [_to_staff_viewing(session, record) for record in records]
+    return StaffViewingPage(
+        data=data,
+        pagination={"page": page, "page_size": page_size, "total": total},
+    )
+
+
+@staff_viewings_router.post("/{reference}/cancel", response_model=StaffViewing)
+def cancel_staff_viewing(
+    reference: str,
+    payload: StaffViewingCancel,
+    staff: StaffPrincipal = Depends(require_staff),
+) -> StaffViewing:
+    cipher = ContactCipher()
+    with SessionLocal() as session:
+        record = session.scalar(
+            select(AppointmentRecord).where(AppointmentRecord.reference == reference)
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="Viewing was not found")
+        if record.status in {"cancelled", "completed"}:
+            raise HTTPException(status_code=409, detail="Closed viewings cannot be changed")
+        if staff.role == "agent" and record.employee.casefold() != staff.display_name.casefold():
+            raise HTTPException(status_code=403, detail="Viewing is not assigned to this agent")
+        decrypted_email = cipher.decrypt(record.contact_email_ciphertext)
+
+    update_dto = AppointmentUpdate(
+        reference=reference,
+        contact_email=decrypted_email,
+        idempotency_key=payload.idempotency_key,
+        meeting_notes=payload.reason,
+    )
+    try:
+        _appointment_service.update(update_dto, cancel=True, verified_contact=True)
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+
+    with SessionLocal() as session:
+        rec = session.scalar(
+            select(AppointmentRecord).where(AppointmentRecord.reference == reference)
+        )
+        return _to_staff_viewing(session, rec)
+
+
+@staff_viewings_router.post("/{reference}/reschedule", response_model=StaffViewing)
+def reschedule_staff_viewing(
+    reference: str,
+    payload: StaffViewingReschedule,
+    staff: StaffPrincipal = Depends(require_staff),
+) -> StaffViewing:
+    cipher = ContactCipher()
+    with SessionLocal() as session:
+        record = session.scalar(
+            select(AppointmentRecord).where(AppointmentRecord.reference == reference)
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="Viewing was not found")
+        if record.status in {"cancelled", "completed"}:
+            raise HTTPException(status_code=409, detail="Closed viewings cannot be changed")
+        if staff.role == "agent" and record.employee.casefold() != staff.display_name.casefold():
+            raise HTTPException(status_code=403, detail="Viewing is not assigned to this agent")
+        decrypted_email = cipher.decrypt(record.contact_email_ciphertext)
+
+    update_dto = AppointmentUpdate(
+        reference=reference,
+        contact_email=decrypted_email,
+        idempotency_key=payload.idempotency_key,
+        starts_at=payload.new_starts_at,
+    )
+    try:
+        _appointment_service.update(update_dto, cancel=False, verified_contact=True)
+    except ValueError as err:
+        err_msg = str(err)
+        if "already booked" in err_msg:
+            raise HTTPException(status_code=409, detail=err_msg)
+        raise HTTPException(status_code=422, detail=err_msg)
+
+    with SessionLocal() as session:
+        rec = session.scalar(
+            select(AppointmentRecord).where(AppointmentRecord.reference == reference)
+        )
+        return _to_staff_viewing(session, rec)
+
+
+class StaffAreaGuideCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    city_slug: str = Field(min_length=2, max_length=64)
+    area_slug: str = Field(min_length=2, max_length=128)
+    title: str = Field(min_length=3, max_length=255)
+    overview_markdown: str = Field(default="", max_length=10000)
+    amenities_summary: str = Field(default="", max_length=5000)
+    transport_info: str = Field(default="", max_length=5000)
+    investment_outlook: str = Field(default="", max_length=5000)
+    sources: list[dict[str, object]] = Field(default_factory=list)
+
+
+class StaffAreaGuide(BaseModel):
+    id: str
+    city_slug: str
+    area_slug: str
+    title: str
+    overview_markdown: str
+    amenities_summary: str
+    transport_info: str
+    investment_outlook: str
+    publication_status: str
+    reviewed_at: datetime | None
+    reviewer_id: str | None
+    sources: list[dict[str, object]]
+    created_at: datetime
+    updated_at: datetime
+
+
+staff_areas_router = APIRouter(prefix="/v1/staff/areas", tags=["staff areas"])
+
+
+@staff_areas_router.get("", response_model=list[StaffAreaGuide])
+def list_staff_area_guides(
+    staff: StaffPrincipal = Depends(require_staff),
+) -> list[StaffAreaGuide]:
+    with SessionLocal() as session:
+        records = session.scalars(
+            select(AreaGuideRecord).order_by(AreaGuideRecord.title.asc())
+        ).all()
+        return [
+            StaffAreaGuide(
+                id=rec.id,
+                city_slug=rec.city_slug,
+                area_slug=rec.area_slug,
+                title=rec.title,
+                overview_markdown=rec.overview_markdown,
+                amenities_summary=rec.amenities_summary,
+                transport_info=rec.transport_info,
+                investment_outlook=rec.investment_outlook,
+                publication_status=rec.publication_status,
+                reviewed_at=rec.reviewed_at,
+                reviewer_id=rec.reviewer_id,
+                sources=rec.sources_json or [],
+                created_at=rec.created_at,
+                updated_at=rec.updated_at,
+            )
+            for rec in records
+        ]
+
+
+@staff_areas_router.post("", response_model=StaffAreaGuide, status_code=201)
+def create_staff_area_guide(
+    payload: StaffAreaGuideCreate,
+    staff: StaffPrincipal = Depends(require_roles("administrator", "manager")),
+) -> StaffAreaGuide:
+    now = datetime.now(UTC)
+    guide_id = str(uuid4())
+    with SessionLocal.begin() as session:
+        existing = session.scalar(
+            select(AreaGuideRecord).where(
+                AreaGuideRecord.city_slug == payload.city_slug.lower(),
+                AreaGuideRecord.area_slug == payload.area_slug.lower(),
+            )
+        )
+        if existing:
+            raise HTTPException(
+                status_code=409, detail="An area guide for this city and area already exists"
+            )
+        record = AreaGuideRecord(
+            id=guide_id,
+            city_slug=payload.city_slug.lower(),
+            area_slug=payload.area_slug.lower(),
+            title=payload.title,
+            overview_markdown=payload.overview_markdown,
+            amenities_summary=payload.amenities_summary,
+            transport_info=payload.transport_info,
+            investment_outlook=payload.investment_outlook,
+            publication_status="published",
+            reviewed_at=now,
+            reviewer_id=staff.subject,
+            sources_json=payload.sources,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(record)
+        session.flush()
+        return StaffAreaGuide(
+            id=record.id,
+            city_slug=record.city_slug,
+            area_slug=record.area_slug,
+            title=record.title,
+            overview_markdown=record.overview_markdown,
+            amenities_summary=record.amenities_summary,
+            transport_info=record.transport_info,
+            investment_outlook=record.investment_outlook,
+            publication_status=record.publication_status,
+            reviewed_at=record.reviewed_at,
+            reviewer_id=record.reviewer_id,
+            sources=record.sources_json or [],
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )

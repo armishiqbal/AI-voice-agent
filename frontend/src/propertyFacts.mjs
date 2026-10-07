@@ -68,3 +68,10 @@ export function filterAndSortProperties(properties, filters = {}) {
 function normalizeFilter(value) {
   return typeof value === "string" ? value.trim().toLocaleLowerCase() : "";
 }
+
+export function reviewedSizeLabel(sqft, sqftPerMarla) {
+  const canonical = `${Number(sqft).toLocaleString("en-PK")} sq ft`;
+  return typeof sqftPerMarla === "number" && Number.isFinite(sqftPerMarla) && sqftPerMarla > 0
+    ? `${(sqft / sqftPerMarla).toFixed(1).replace(/\.0$/, "")} Marla (${canonical})`
+    : canonical;
+}

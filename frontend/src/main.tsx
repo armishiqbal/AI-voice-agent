@@ -1,3 +1,4 @@
+import { reviewedSizeLabel } from "./propertyFacts.mjs";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { NeuralOrb } from "./NeuralOrb";
@@ -21,12 +22,17 @@ import {
   shouldOfferVoiceRetry,
 } from "./voiceUiState.mjs";
 import { PropertyComparisonHUD } from "./PropertyComparisonHUD";
-import { PropertyLocations } from "./PropertyLocations";
 import { MortgageCalculatorModal } from "./MortgageCalculatorModal";
-import { AnalyticsPanel } from "./AnalyticsPanel";
-import { availabilityLabel, canRequestVisit, inventorySourceLabel, inventoryStatusSummary } from "./propertyFacts.mjs";
-import { defaultVisitSlot, visitSlotError, visitSlotToIso } from "./visitSlots.mjs";
+import { canRequestVisit } from "./propertyFacts.mjs";
 import { useNativeDialog } from "./useNativeDialog";
+import {
+  createActionExecutedMessage,
+  createFrameStatusMessage,
+  createHelloMessage,
+  hasTrustedMessageOriginAndSource,
+  parseParentMessage,
+  type AssistantPhase,
+} from "../../shared/assistantBridge.mjs";
 import "./styles.css";
 
 type Property = {
@@ -44,6 +50,17 @@ type Property = {
   assigned_employee: string;
   source_version: string;
   source: string;
+  publisher?: {id:string;slug:string;name:string} | null;
+  rental_period?: string | null;
+  sqft_per_marla?: number | null;
+  slug?: string;
+  photos?: Array<{ url: string; alt_text: string; sort_order: number }>;
+  transaction_type?: "sale" | "rent";
+  property_type?: string;
+  bathrooms?: number | null;
+  availability_status?: string;
+  availability_confirmed_at?: string | null;
+  verification?: { status: string; reviewed_at: string | null; scope: string | null; source_url?: string | null };
 };
 
 type Message = { role: "customer" | "agent"; text: string; time: string };
@@ -51,18 +68,12 @@ type VoicePhase = "checking" | "blocked" | "idle" | "connecting" | "authenticati
 type VoiceFailureStage = "session" | "microphone" | "transcription" | "agent" | "playback";
 type FeedbackTone = "info" | "pending" | "success" | "error";
 type VoiceMode = "standard" | "openai" | "hybrid";
-type InventoryLoadState = "loading" | "ready" | "error";
 
 const stamp = () => new Intl.DateTimeFormat("en-PK", { hour: "numeric", minute: "2-digit" }).format(new Date());
+const idempotencyKey = () => typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+  ? crypto.randomUUID()
+  : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-function getMarlaEquivalent(sqft: number): string {
-  if (sqft >= 4500) {
-    const kanal = (sqft / 4500).toFixed(1).replace(/\.0$/, "");
-    return `${kanal} Kanal`;
-  }
-  const marla = (sqft / 225).toFixed(1).replace(/\.0$/, "");
-  return `${marla} Marla`;
-}
 
 function formatPricePKR(price: number): string {
   if (price >= 10_000_000) {
@@ -87,9 +98,30 @@ function resolveDefaultApiUrl(): string {
   return "http://localhost:8000";
 }
 
+function publicWebsiteOrigin(parentOrigin: string | null): string {
+  if (parentOrigin) return parentOrigin;
+  const configured = import.meta.env.VITE_PUBLIC_WEBSITE_URL as string | undefined;
+  if (configured) return configured.replace(/\/$/, "");
+  if (import.meta.env.PROD) return window.location.origin;
+  return `${window.location.protocol}//${window.location.hostname}:3000`;
+}
+
 const rawApiUrl = (import.meta.env.VITE_API_URL as string | undefined) || resolveDefaultApiUrl();
 const apiUrl = rawApiUrl.replace(/\/+$/, "");
 const wsUrl = (import.meta.env.VITE_WS_URL as string | undefined) || (apiUrl.replace(/^http/, "ws") + "/v1/voice");
+const configuredAssistantParentOrigins = new Set(
+  ((import.meta.env.VITE_ASSISTANT_PARENT_ORIGINS as string | undefined)
+    || "http://localhost:3000,http://127.0.0.1:3000")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
+
+function bridgePhase(phase: VoicePhase): AssistantPhase {
+  if (phase === "checking" || phase === "blocked") return phase === "blocked" ? "error" : "idle";
+  if (phase === "authenticating" || phase === "starting_microphone") return "connecting";
+  return phase;
+}
 
 function Icon({ children }: { children: string }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={children} /></svg>;
@@ -166,11 +198,9 @@ function App() {
   const [transcriptFinalized, setTranscriptFinalized] = useState(false);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
+  const [conversationFailed, setConversationFailed] = useState(false);
   const [conversationCopyStatus, setConversationCopyStatus] = useState("");
   const [matches, setMatches] = useState<string[]>([]);
-  const [inventoryProperties, setInventoryProperties] = useState<Property[]>([]);
-  const [inventoryLoadState, setInventoryLoadState] = useState<InventoryLoadState>("loading");
-  const [inventoryRefreshKey, setInventoryRefreshKey] = useState(0);
   const [propertyDetails, setPropertyDetails] = useState<Record<string, Property>>({});
   const [loadingPropertyIds, setLoadingPropertyIds] = useState<string[]>([]);
   const [socket, setSocket] = useState<WebSocket | null>(null);
@@ -195,31 +225,48 @@ function App() {
   const [readinessCheckFailed, setReadinessCheckFailed] = useState(false);
   const [readinessRefreshKey, setReadinessRefreshKey] = useState(0);
   const [selectedPropertyId, setSelectedPropertyId] = useState<string>("");
-  const [showDrawer, setShowDrawer] = useState(false);
+  const [showDrawer, setShowDrawer] = useState(true);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [showAnalytics, setShowAnalytics] = useState(false);
+  const [matchMessage, setMatchMessage] = useState("");
+  const [inquiryPropertyId, setInquiryPropertyId] = useState<string | null>(null);
+  const [inquiryStatus, setInquiryStatus] = useState("");
+  const [inquiryForm, setInquiryForm] = useState({ name: "", email: "", message: "", consent: false });
   const [comparedPropertyIds, setComparedPropertyIds] = useState<string[]>([]);
   const [showCompareHUD, setShowCompareHUD] = useState(false);
-  const [showLocations, setShowLocations] = useState(false);
   const [showMortgageCalc, setShowMortgageCalc] = useState(false);
+  const [mortgageCustomProperty, setMortgageCustomProperty] = useState<Property | null>(null);
+  const [mortgageCustomDownPct, setMortgageCustomDownPct] = useState<number | undefined>(undefined);
+  const [mortgageCustomTenureYears, setMortgageCustomTenureYears] = useState<number | undefined>(undefined);
   const [lastTiming, setLastTiming] = useState<{ label: string; milliseconds: number } | null>(null);
   const [agentDecisionLatencyMs, setAgentDecisionLatencyMs] = useState<number | null>(null);
   const [substantiveAnswerLatencyMs, setSubstantiveAnswerLatencyMs] = useState<number | null>(null);
   const [audioAnalyser, setAudioAnalyser] = useState<AnalyserNode | null>(null);
   const httpTurnAbort = useRef<AbortController | null>(null);
+  const bridgeParentOrigin = useRef<string | null>(null);
+  const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => undefined);
+  const lastSubmittedText = useRef("");
 
   const [appointmentForm, setAppointmentForm] = useState({
     client_name: "",
     contact_email: "",
     contact_phone: "",
-    starts_at: defaultVisitSlot(),
+    starts_at: "",
     consent: false,
   });
+  const [viewingSlots, setViewingSlots] = useState<string[]>([]);
+  const [slotsLoading, setSlotsLoading] = useState(false);
+  const [viewingOtp, setViewingOtp] = useState("");
+  const [viewingVerificationToken, setViewingVerificationToken] = useState("");
+  const [viewingOtpMessage, setViewingOtpMessage] = useState("");
+  const [viewingEmailVerified, setViewingEmailVerified] = useState(false);
 
   const conversationId = useRef(
     typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `conv-${Date.now()}`
   );
   const bookingDialog = useRef<HTMLDialogElement | null>(null);
+  const inquiryDialog = useRef<HTMLDialogElement | null>(null);
+  const inquiryIdempotencyKey = useRef(idempotencyKey());
+  const viewingIdempotencyKey = useRef(idempotencyKey());
   const textInputRef = useRef<HTMLInputElement | null>(null);
   const settingsDialog = useNativeDialog(showSettingsModal);
   const replayAudio = useRef(new BoundedAudioReplay());
@@ -275,7 +322,7 @@ function App() {
   const sessionRequestedRef = useRef(false);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
-  const chatBottomRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
 
   const connected = socket?.readyState === WebSocket.OPEN;
   const sessionReady = connected && voicePhase !== "authenticating";
@@ -333,17 +380,43 @@ function App() {
     },
   ] as const;
   const availableMatches = matches.filter((id) => canRequestVisit(propertyDetails[id]));
-  const hasAvailableListings = inventoryProperties.some((property) => canRequestVisit(property));
-  const inventoryStatus = inventoryStatusSummary(inventoryLoadState, inventoryProperties);
-  const compactInventoryLabel = inventoryStatus.tone === "ready"
-    ? `${inventoryProperties.filter(canRequestVisit).length} live`
-    : inventoryStatus.tone === "loading" ? "Loading"
-      : inventoryStatus.tone === "error" ? "Offline" : "0 listings";
-  const appointmentSlotError = visitSlotError(appointmentForm.starts_at);
+  const appointmentSlotError = viewingSlots.includes(appointmentForm.starts_at) ? "" : "Choose a currently available viewing slot.";
 
   useEffect(() => {
     voiceModeRef.current = voiceMode;
   }, [voiceMode]);
+
+  useEffect(() => {
+    const trustedOrigins = new Set([...configuredAssistantParentOrigins, window.location.origin]);
+
+    const handleParentMessage = (event: MessageEvent<unknown>) => {
+      if (!hasTrustedMessageOriginAndSource(event, window.parent, [...trustedOrigins])) return;
+      bridgeParentOrigin.current = event.origin;
+      const message = parseParentMessage(event.data);
+      if (!message) return;
+      if (message.type === "hello") {
+        window.parent.postMessage(
+          createFrameStatusMessage("ready", bridgePhase(voicePhaseRef.current)),
+          event.origin,
+        );
+        return;
+      }
+      void sendMessageRef.current(message.text);
+    };
+
+    window.addEventListener("message", handleParentMessage);
+
+    return () => window.removeEventListener("message", handleParentMessage);
+  }, []);
+
+  useEffect(() => {
+    const trustedOrigin = bridgeParentOrigin.current;
+    if (!trustedOrigin) return;
+    window.parent.postMessage(
+      createFrameStatusMessage("state", bridgePhase(displayVoicePhase)),
+      trustedOrigin,
+    );
+  }, [displayVoicePhase]);
 
   useEffect(() => {
     if (!reconnectAfterLanguageChange.current || socket || connecting) return;
@@ -352,25 +425,15 @@ function App() {
   }, [connecting, socket, voiceMode]);
 
   useEffect(() => {
-    if (!showDrawer || (messages.length === 0 && matches.length === 0)) return;
-    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, matches, showDrawer]);
+    const messageList = messageListRef.current;
+    if (!showDrawer || !messageList || messages.length === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      messageList.scrollTo({ top: messageList.scrollHeight, behavior: "smooth" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, showDrawer]);
 
   // Load properties preview
-  useEffect(() => {
-    void fetch(`${apiUrl}/v1/properties`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`Inventory request failed (${res.status})`);
-        return res.json();
-      })
-      .then((data: Property[]) => {
-        if (!Array.isArray(data)) throw new Error("Inventory response was not a list");
-        setInventoryProperties(data);
-        setInventoryLoadState("ready");
-      })
-      .catch(() => setInventoryLoadState("error"));
-  }, [inventoryRefreshKey]);
-
   // Check server readiness
   useEffect(() => {
     let active = true;
@@ -427,23 +490,120 @@ function App() {
 
   function loadMatchedProperties(ids: string[]) {
     if (ids.length === 0) return;
-    setLoadingPropertyIds((current) => [...new Set([...current, ...ids])]);
-    void Promise.all(ids.map(async (id) => {
+    const requested = [...new Set(ids)].slice(0, 3);
+    setMatchMessage("");
+    setLoadingPropertyIds((current) => [...new Set([...current, ...requested])]);
+    void Promise.all(requested.map(async (id) => {
       try {
-        const response = await fetch(`${apiUrl}/v1/properties/${encodeURIComponent(id)}`);
-        if (!response.ok) return null;
-        return await response.json() as Property;
+        const response = await fetch(`${apiUrl}/v1/public/listings/by-id/${encodeURIComponent(id)}`);
+        if (!response.ok) return { id, listing: null };
+        const listing = await response.json();
+        if (!listing || listing.id !== id || typeof listing.slug !== "string" || !Array.isArray(listing.photos)) {
+          return { id, listing: null };
+        }
+        const property: Property = {
+          id: listing.id,
+          publisher: listing.publisher, rental_period: listing.rental_period, sqft_per_marla: listing.sqft_per_marla,
+          slug: listing.slug,
+          title: listing.title,
+          city: listing.city,
+          area: listing.area,
+          price_pkr: listing.price_pkr,
+          bedrooms: listing.bedrooms,
+          bathrooms: listing.bathrooms,
+          size_sqft: listing.size_sqft,
+          purpose: listing.transaction_type,
+          transaction_type: listing.transaction_type,
+          property_type: listing.property_type,
+          amenities: listing.amenities,
+          payment_plan: "",
+          available: listing.availability_status === "available",
+          availability_status: listing.availability_status,
+          availability_confirmed_at: listing.availability_confirmed_at,
+          verification: listing.verification,
+          photos: listing.photos,
+          assigned_employee: "",
+          source_version: "published",
+          source: "published marketplace",
+        };
+        return { id, listing: property };
       } catch {
-        return null;
+        return { id, listing: null };
       }
     })).then((items) => {
+      const valid = items.flatMap((item) => item.listing ? [item.listing] : []);
+      const stale = items.some((item) => !item.listing);
+      setMatches(valid.map((item) => item.id));
+      if (!valid.some((item) => item.id === selectedPropertyId)) setSelectedPropertyId(valid[0]?.id ?? "");
+      setMatchMessage(stale ? "Some suggested listings changed or are no longer eligible. Ask for a fresh search to see current options." : "");
       setPropertyDetails((current) => ({
         ...current,
-        ...Object.fromEntries(items.filter((item): item is Property => item !== null).map((item) => [item.id, item])),
+        ...Object.fromEntries(valid.map((item) => [item.id, item])),
       }));
     }).finally(() => {
-      setLoadingPropertyIds((current) => current.filter((id) => !ids.includes(id)));
+      setLoadingPropertyIds((current) => current.filter((id) => !requested.includes(id)));
     });
+  }
+
+  async function refreshViewingSlots(propertyId: string) {
+    setSlotsLoading(true);
+    setViewingSlots([]);
+    try {
+      const response = await fetch(`${apiUrl}/v1/public/listings/${encodeURIComponent(propertyId)}/slots`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Viewing slots could not be loaded.");
+      const slots = Array.isArray(data.data) ? data.data.filter((slot: unknown): slot is string => typeof slot === "string") : [];
+      setViewingSlots(slots);
+      setAppointmentForm((current) => ({ ...current, starts_at: slots[0] ?? "" }));
+      if (slots.length === 0) setAppointmentStatus("No current viewing slots are available. You can still send an inquiry.");
+    } catch (error) {
+      setAppointmentStatus(error instanceof Error ? error.message : "Viewing slots could not be loaded.");
+    } finally {
+      setSlotsLoading(false);
+    }
+  }
+
+  async function requestViewingOtp() {
+    const email = appointmentForm.contact_email.trim();
+    if (!email) {
+      setAppointmentTone("error");
+      setViewingOtpMessage("Enter your email address first.");
+      return;
+    }
+    setViewingOtpMessage("Requesting a verification code…");
+    try {
+      const response = await fetch(`${apiUrl}/v1/public/viewings/request-otp`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Verification email could not be requested.");
+      setViewingOtpMessage(data.message || "Check your email for the verification code.");
+      if (typeof data.debug_otp === "string" && import.meta.env.DEV) {
+        setViewingOtpMessage(`${data.message} Local development code: ${data.debug_otp}`);
+      }
+      setViewingEmailVerified(false);
+      setViewingVerificationToken("");
+    } catch (error) {
+      setViewingOtpMessage(error instanceof Error ? error.message : "Verification email could not be requested.");
+    }
+  }
+
+  async function verifyViewingOtp() {
+    try {
+      const response = await fetch(`${apiUrl}/v1/public/viewings/verify-otp`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: appointmentForm.contact_email.trim(), otp: viewingOtp.trim() }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "That code could not be verified.");
+      setViewingVerificationToken(data.verification_token);
+      setViewingEmailVerified(true);
+      setViewingOtpMessage("Email verified for this viewing request.");
+    } catch (error) {
+      setViewingEmailVerified(false);
+      setViewingVerificationToken("");
+      setViewingOtpMessage(error instanceof Error ? error.message : "That code could not be verified.");
+    }
   }
 
   async function startCapture(ws: WebSocket, mode: VoiceMode) {
@@ -829,6 +989,7 @@ function App() {
           audioOutputUnavailableRef.current = false;
           setAudioOutputUnavailable(false);
           setMessages((current) => [...current, { role: "agent", text, time: stamp() }]);
+          setConversationFailed(false);
           const transcriptionRecovery = event.decision.reason === "transcription_incomplete";
           if (transcriptionRecovery) {
             answerAudioOriginAt.current = null;
@@ -846,6 +1007,9 @@ function App() {
             loadMatchedProperties(ids);
           } else if (!transcriptionRecovery) {
             setActiveActionLabel("Preparing your spoken reply…");
+          }
+          if (Array.isArray(event.decision.actions) && event.decision.actions.length > 0) {
+            dispatchDecisionActions(event.decision.actions);
           }
         }
         if (event.type === "transcript_low_confidence") {
@@ -1043,6 +1207,8 @@ function App() {
     const text = (overrideText ?? input).trim();
     if (!text) return;
     setInput("");
+    lastSubmittedText.current = text;
+    setConversationFailed(false);
     setShowDrawer(true);
     responses.current.interrupt();
     playback.current.stop();
@@ -1082,28 +1248,36 @@ function App() {
       if (reasoningStatus) setReasoningProviderStatus(reasoningStatus);
       setLastTiming({ label: "Text request", milliseconds: Math.round(performance.now() - start) });
       const decision = data.decision || data;
-      const reply =
+      const rawReply =
         decision.spoken_text ||
         decision.text ||
         data.spoken_text ||
-        data.text ||
-        "Main aapki madad kar sakta hoon.";
+        data.text;
+      if (typeof rawReply !== "string" || !rawReply.trim()) throw new Error("The assistant returned an empty reply");
+      const reply = rawReply.trim();
+      setConversationFailed(false);
       setSubtitles(reply);
       setMessages((current) => [...current, { role: "agent", text: reply, time: stamp() }]);
       setActiveActionLabel("Reply received");
       setVoicePhase("idle");
 
-      const ids: string[] = decision.property_ids || data.property_ids || [];
+      const rawIds: unknown = decision.property_ids || data.property_ids || [];
+      const ids = Array.isArray(rawIds) ? rawIds.filter((id): id is string => typeof id === "string") : [];
       if (ids.length > 0) {
         setMatches(ids);
         if (!selectedPropertyId) setSelectedPropertyId(ids[0]);
         setShowDrawer(true);
         loadMatchedProperties(ids);
       }
+      const rawActions = decision.actions || data.actions;
+      if (Array.isArray(rawActions) && rawActions.length > 0) {
+        dispatchDecisionActions(rawActions);
+      }
     } catch (error: unknown) {
       if (error instanceof Error && error.name === "AbortError") return;
       if (httpTurnAbort.current !== controller) return;
       setVoicePhase("error");
+      setConversationFailed(true);
       setActiveActionLabel("The live assistant could not respond. Please try again.");
       setMessages((current) => [
         ...current,
@@ -1118,6 +1292,8 @@ function App() {
     }
   }
 
+  sendMessageRef.current = send;
+
   async function bookVisit() {
     if (!appointmentForm.consent) {
       setAppointmentTone("error");
@@ -1129,6 +1305,11 @@ function App() {
       setAppointmentStatus(appointmentSlotError);
       return;
     }
+    if (!viewingEmailVerified || !viewingVerificationToken) {
+      setAppointmentTone("error");
+      setAppointmentStatus("Verify your email before reserving this viewing.");
+      return;
+    }
     if (!selectedPropertyId || !canRequestVisit(propertyDetails[selectedPropertyId])) {
       setAppointmentTone("error");
       setAppointmentStatus("Select a loaded, available listing before requesting a visit.");
@@ -1136,10 +1317,10 @@ function App() {
       return;
     }
     setActiveActionLabel("Sending your visit request…");
-    setAppointmentStatus("Scheduling site visit…");
+    setAppointmentStatus("Saving the viewing reservation…");
     setAppointmentTone("pending");
     try {
-      const response = await fetch(`${apiUrl}/v1/appointments`, {
+      const response = await fetch(`${apiUrl}/v1/public/viewings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1147,27 +1328,31 @@ function App() {
           contact_email: appointmentForm.contact_email,
           contact_phone: appointmentForm.contact_phone || null,
           property_id: selectedPropertyId,
-          employee: propertyDetails[selectedPropertyId]?.assigned_employee ?? "",
-          idempotency_key:
-            typeof crypto !== "undefined" && crypto.randomUUID
-              ? crypto.randomUUID()
-              : "00000000-0000-0000-0000-000000000001",
-          starts_at: visitSlotToIso(appointmentForm.starts_at),
+          idempotency_key: viewingIdempotencyKey.current,
+          starts_at: appointmentForm.starts_at,
+          verification_token: viewingVerificationToken,
           consent: true,
+          consent_version: "2026-10-03",
         }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "Booking failed");
-      setAppointmentTone("pending");
-      setAppointmentStatus(`Visit request recorded. Calendar confirmation pending — reference ${data.reference}.`);
+      if (!response.ok) {
+        if (response.status === 409) await refreshViewingSlots(selectedPropertyId);
+        throw new Error(data.detail || "Viewing reservation could not be saved.");
+      }
+      const delivery = data.delivery_status === "pending"
+        ? "External confirmation is pending."
+        : data.delivery_status === "not_configured" ? "External email or Calendar delivery is not configured." : `External delivery: ${data.delivery_status}.`;
+      setAppointmentTone(data.delivery_status === "pending" ? "pending" : "success");
+      setAppointmentStatus(`Reservation saved (${data.status}). Reference ${data.reference}. ${delivery}`);
+      viewingIdempotencyKey.current = idempotencyKey();
       setShowDrawer(true);
-      bookingDialog.current?.close();
-      setActiveActionLabel(`Visit request recorded. Reference ${data.reference}.`);
+      setActiveActionLabel(`Viewing reservation saved. Reference ${data.reference}.`);
       setMessages((current) => [
         ...current,
         {
           role: "agent",
-          text: `Visit request recorded for property ${data.property_id || selectedPropertyId}. Calendar confirmation is pending. Reference: ${data.reference}`,
+          text: `Viewing reservation saved for ${propertyDetails[selectedPropertyId]?.title ?? "the selected property"}. Reference: ${data.reference}. ${delivery}`,
           time: stamp(),
         },
       ]);
@@ -1175,6 +1360,44 @@ function App() {
       setAppointmentTone("error");
       setAppointmentStatus(err instanceof Error ? err.message : "Booking failed");
       setActiveActionLabel("The visit request could not be submitted.");
+    }
+  }
+
+  async function submitPropertyInquiry() {
+    if (!inquiryPropertyId || !inquiryForm.consent) {
+      setInquiryStatus("Consent is required before sending this inquiry.");
+      return;
+    }
+    setInquiryStatus("Saving your inquiry…");
+    try {
+      const response = await fetch(`${apiUrl}/v1/public/inquiries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          property_id: inquiryPropertyId,
+          request_type: "property",
+          client_name: inquiryForm.name.trim(),
+          contact_email: inquiryForm.email.trim(),
+          contact_phone: null,
+          contact_preference: "email",
+          message: inquiryForm.message.trim(),
+          consent: true,
+          consent_version: "2026-10-03",
+          idempotency_key: inquiryIdempotencyKey.current,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Your inquiry could not be saved.");
+      const delivery = data.delivery_status === "pending" ? "Staff notification is pending." : `Staff notification: ${data.delivery_status}.`;
+      setInquiryStatus(`Inquiry saved. ${delivery}`);
+      inquiryIdempotencyKey.current = idempotencyKey();
+      setMessages((current) => [...current, {
+        role: "agent",
+        text: `Your property inquiry has been saved. ${delivery}`,
+        time: stamp(),
+      }]);
+    } catch (error) {
+      setInquiryStatus(error instanceof Error ? error.message : "Your inquiry could not be saved.");
     }
   }
 
@@ -1187,7 +1410,147 @@ function App() {
     }
     setSelectedPropertyId(propertyId);
     setAppointmentStatus("");
+    setAppointmentTone("info");
+    setViewingOtp("");
+    setViewingOtpMessage("");
+    setViewingEmailVerified(false);
+    setViewingVerificationToken("");
+    setViewingSlots([]);
+    void refreshViewingSlots(propertyId);
     bookingDialog.current?.showModal();
+  }
+
+  function dispatchDecisionActions(rawActions: unknown[]) {
+    if (!Array.isArray(rawActions) || rawActions.length === 0) return;
+    for (const raw of rawActions) {
+      if (!raw || typeof raw !== "object") continue;
+      const action = raw as {
+        id?: string;
+        kind: "filter_catalog" | "compare_properties" | "shortlist_property" | "calculate_mortgage" | "schedule_viewing" | "navigate_to";
+        payload?: Record<string, unknown>;
+        summary?: string;
+        executed?: boolean;
+      };
+      if (!action.kind) continue;
+      const payload = action.payload || {};
+
+      // 1. Calculate Mortgage Action
+      if (action.kind === "calculate_mortgage") {
+        const price = typeof payload.property_price_pkr === "number" ? payload.property_price_pkr : 0;
+        if (price <= 0) {
+          setActiveActionLabel("I need a property price before opening an installment estimate.");
+          continue;
+        }
+        const down = typeof payload.down_payment_pct === "number" ? payload.down_payment_pct : 25;
+        const tenure = typeof payload.tenure_years === "number" ? payload.tenure_years : 15;
+        setMortgageCustomProperty({
+          id: "CALC",
+          title: `Financing Estimate (${formatPricePKR(price)})`,
+          city: "Islamabad",
+          area: "Capital",
+          price_pkr: price,
+          available: true,
+          bedrooms: 0,
+          size_sqft: 0,
+          purpose: "sale",
+          amenities: [],
+          payment_plan: "",
+          assigned_employee: "Awaaz Advisory",
+          source_version: "1",
+          source: "user",
+        });
+        setMortgageCustomDownPct(down);
+        setMortgageCustomTenureYears(tenure);
+        setShowMortgageCalc(true);
+        setActiveActionLabel(action.summary || "Opened mortgage installment calculator");
+      }
+
+      // 2. Shortlist Property Action
+      if (action.kind === "shortlist_property") {
+        const propId = String(payload.property_id || "").toLowerCase();
+        const property = propertyDetails[propId];
+        if (!property || !property.available) {
+          setActiveActionLabel("I could not save that listing because it is not in the current available results.");
+          continue;
+        }
+        const isAdd = payload.action !== "remove";
+        try {
+          const raw = window.localStorage.getItem("awaaz_guest_shortlist");
+          const list = raw ? JSON.parse(raw) : [];
+          const currentList: string[] = Array.isArray(list) ? list : [];
+          let updatedList: string[];
+          if (isAdd) {
+            updatedList = currentList.includes(propId) ? currentList : [propId, ...currentList];
+          } else {
+            updatedList = currentList.filter((s) => s !== propId);
+          }
+          window.localStorage.setItem("awaaz_guest_shortlist", JSON.stringify(updatedList));
+          window.dispatchEvent(new CustomEvent("awaaz:shortlist:changed", { detail: updatedList }));
+        } catch {
+          // localStorage might be unavailable in sandboxed context
+        }
+        setActiveActionLabel(action.summary || `Property ${propId.toUpperCase()} ${isAdd ? "added to" : "removed from"} shortlist`);
+      }
+
+      // 3. Navigation Action
+      if (action.kind === "navigate_to") {
+        const targetPath = String(payload.path || "/properties");
+        const label = String(payload.label || "Page");
+        setActiveActionLabel(`Navigating to ${label}...`);
+        setTimeout(() => {
+          if (window.parent === window) {
+            window.location.href = targetPath;
+          }
+        }, 1200);
+      }
+
+      // 4. Filter Catalog Action
+      if (action.kind === "filter_catalog") {
+        const parts = [payload.city, payload.area, payload.purpose].filter(Boolean).map(String);
+        setActiveActionLabel(action.summary || `Filtered catalog: ${parts.join(" · ")}`);
+      }
+
+      // 5. Schedule Viewing Action
+      if (action.kind === "schedule_viewing") {
+        const pid = String(payload.property_id || "");
+        if (pid) {
+          setSelectedPropertyId(pid);
+          openBookingFor(pid);
+        } else if (selectedPropertyId) {
+          openBookingFor(selectedPropertyId);
+        }
+        setActiveActionLabel(action.summary || "Viewing request form opened. Confirm a slot and your contact consent to submit it.");
+      }
+
+      // 6. Compare action
+      if (action.kind === "compare_properties") {
+        const ids = Array.isArray(payload.property_ids)
+          ? payload.property_ids.filter((id): id is string => typeof id === "string" && Boolean(propertyDetails[id]?.available))
+          : [];
+        if (ids.length < 2) {
+          setActiveActionLabel("Search for at least two currently available listings before comparing.");
+          continue;
+        }
+        setComparedPropertyIds(ids.slice(0, 3));
+        setShowCompareHUD(true);
+        setActiveActionLabel(action.summary || `Comparing ${Math.min(ids.length, 3)} available listings`);
+      }
+
+      // Forward action to parent window bridge if present
+      const trustedOrigin = bridgeParentOrigin.current;
+      if (trustedOrigin && window.parent && window.parent !== window) {
+        window.parent.postMessage(
+          createActionExecutedMessage({
+            id: action.id || `act-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            kind: action.kind,
+            payload,
+            summary: action.summary || "",
+            executed: action.kind === "schedule_viewing" ? false : action.executed !== false,
+          }),
+          trustedOrigin
+        );
+      }
+    }
   }
 
   return (
@@ -1200,7 +1563,7 @@ function App() {
           </div>
           <div className="orbit-title-group">
             <span className="orbit-brand-title">Awaaz Estate</span>
-            <span className="orbit-version-badge">VOICE ASSISTANT</span>
+            <span className="orbit-version-badge">PROPERTY CONCIERGE</span>
           </div>
         </div>
 
@@ -1211,15 +1574,6 @@ function App() {
         </div>
 
         <div className="orbit-header-tools">
-          <button
-            type="button"
-            className="orbit-icon-btn"
-            onClick={() => setShowAnalytics(true)}
-            title="Live service analytics"
-            aria-label="Open live service analytics"
-          >
-            <Icon>{paths.chart}</Icon>
-          </button>
           <button
             type="button"
             className="orbit-icon-btn"
@@ -1244,17 +1598,6 @@ function App() {
             <span className="status-dot" />
             <span>{connectionStatus.label}</span>
           </div>
-          <button
-            type="button"
-            className={`orbit-inventory-chip ${inventoryStatus.tone}`}
-            onClick={() => setShowLocations(true)}
-            title={`${inventoryStatus.detail}. Open property inventory.`}
-            aria-label={`${inventoryStatus.label}. ${inventoryStatus.detail}. Open property inventory.`}
-          >
-            <Icon>{paths.home}</Icon>
-            <span className="orbit-inventory-label" aria-live="polite">{inventoryStatus.label}</span>
-            <span className="orbit-inventory-compact" aria-hidden="true">{compactInventoryLabel}</span>
-          </button>
         </div>
       </header>
 
@@ -1423,6 +1766,7 @@ function App() {
         {voiceFailureStage && (
           <div className="voice-error-notice" role="alert" aria-live="assertive">
             <span>{activeActionLabel}</span>
+            <a href={`${publicWebsiteOrigin(bridgeParentOrigin.current)}/properties`} target="_top">Browse listings</a>
             {shouldOfferVoiceRetry(audioUnavailableReason) && (
               <button
                 type="button"
@@ -1462,17 +1806,6 @@ function App() {
             </button>
           )}
 
-          <button
-            type="button"
-            className={`dock-action-pill ${showDrawer ? "active" : ""}`}
-            onClick={() => setShowDrawer(!showDrawer)}
-            aria-label="Toggle conversation and property recommendations"
-          >
-            <Icon>{paths.transcript}</Icon>
-            <span>{showDrawer ? "Hide Conversation" : "Conversation"}</span>
-            {matches.length > 0 && <span className="dock-count-badge">{matches.length}</span>}
-          </button>
-
           {matches.length >= 2 && (
             <button
               type="button"
@@ -1493,15 +1826,10 @@ function App() {
             </button>
           )}
 
-          <button
-            type="button"
-            className={`dock-action-pill ${showLocations ? "active" : ""}`}
-            onClick={() => setShowLocations(true)}
-            aria-label="Browse available property locations"
-          >
+          <a className="dock-action-pill" href={`${publicWebsiteOrigin(bridgeParentOrigin.current)}/properties`} target="_top" aria-label="Browse company property listings">
             <Icon>{paths.home}</Icon>
-            <span>Locations</span>
-          </button>
+            <span>Browse listings</span>
+          </a>
 
           <button
             type="button"
@@ -1529,48 +1857,6 @@ function App() {
 
         </div>
 
-        {/* Shortcuts submit real questions to the live assistant; they do not use demo inventory. */}
-        <div className="orbit-quick-chips-row" role="group" aria-label="Start with a real estate topic">
-          {[
-            { icon: paths.home, label: "Buy a home", query: "I want to buy a home. Ask for my city, area, and budget, then search available listings." },
-            { icon: paths.home, label: "Find a rental", query: "I want to rent a property. Ask for my city, area, and budget, then search available listings." },
-            { icon: paths.building, label: "Commercial space", query: "I need a commercial property. Ask for my property type, city, area, and budget." },
-            { icon: paths.chart, label: "Investment inquiry", query: "I am considering a property investment. Ask about my goals and explain only what current verified company information supports." },
-            { icon: paths.calendar, label: "Payment plans", query: "Tell me about payment plans only when they are included in a verified available listing." },
-          ].map((chip) => (
-            <button
-              key={chip.label}
-              type="button"
-              className="quick-chip-btn"
-              onClick={() => void performAction(chip.query, chip.label)}
-            >
-              <span className="quick-chip-icon"><Icon>{chip.icon}</Icon></span>
-              <span>{chip.label}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Command Input Bar */}
-        <form
-          className="orbit-input-box"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void send();
-          }}
-        >
-          <input
-            ref={textInputRef}
-            type="text"
-            className="orbit-cmd-input"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about budget, location, property, or booking…"
-            aria-label="Type a message to the real estate assistant"
-          />
-          <button type="submit" className="orbit-cmd-submit" aria-label="Send Command">
-            <Icon>{paths.send}</Icon>
-          </button>
-        </form>
       </div>
 
       {/* Persistent conversation and recommendations panel */}
@@ -1609,14 +1895,6 @@ function App() {
                   Compare ({comparedPropertyIds.length || Math.min(matches.length, 3)}) Side-by-Side
                 </button>
               )}
-              <button
-                type="button"
-                className="drawer-close-btn"
-                onClick={() => setShowDrawer(false)}
-                aria-label="Close conversation panel"
-              >
-                <Icon>{paths.close}</Icon>
-              </button>
             </div>
           </div>
 
@@ -1624,41 +1902,19 @@ function App() {
             {conversationCopyStatus}
           </span>
 
-          {(lastTiming || agentDecisionLatencyMs !== null || substantiveAnswerLatencyMs !== null) && (
-            <details className="conversation-diagnostics">
-              <summary>Voice timing details</summary>
-              <dl>
-                {lastTiming && (
-                  <div>
-                    <dt>{lastTiming.label}</dt>
-                    <dd>{lastTiming.milliseconds.toLocaleString()} ms</dd>
-                  </div>
-                )}
-                {agentDecisionLatencyMs !== null && (
-                  <div>
-                    <dt>Agent decision</dt>
-                    <dd>{agentDecisionLatencyMs.toLocaleString()} ms</dd>
-                  </div>
-                )}
-                {substantiveAnswerLatencyMs !== null && (
-                  <div>
-                    <dt>First answer audio</dt>
-                    <dd>{substantiveAnswerLatencyMs.toLocaleString()} ms</dd>
-                  </div>
-                )}
-              </dl>
-              <p>Timings are local diagnostics; they do not measure human-perceived audio quality.</p>
-            </details>
-          )}
-
           <div className="drawer-scroll-body">
             {/* Messages */}
-            <div className="drawer-messages-list" role="log" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions">
+            <div ref={messageListRef} className="drawer-messages-list" role="log" aria-label="Conversation messages" aria-live="polite" aria-relevant="additions">
               {messages.length === 0 ? (
                 <div className="conversation-start-state" role="status">
-                  <span className="conversation-start-eyebrow">LIVE CONVERSATION</span>
-                  <p>No messages yet</p>
-                  <small>Start a voice conversation or type a question. Replies will appear here after the live assistant responds.</small>
+                  <span className="conversation-start-eyebrow">PROPERTY CONCIERGE</span>
+                  <p>Ask, search, compare, or save a property</p>
+                  <small>Tell me your city, area, budget, or property type. I can search current listings, save an option, compare results, and open an installment estimate. I’ll ask before submitting a viewing request.</small>
+                  <div className="assistant-task-starters" aria-label="Try a property task">
+                    <button type="button" onClick={() => void performAction("Find available homes in Islamabad under 5 crore", "Searching available Islamabad homes")}>Homes in Islamabad</button>
+                    <button type="button" onClick={() => void performAction("Find available two bedroom apartments in Karachi under 3 crore", "Searching two-bedroom Karachi apartments")}>2-bedroom in Karachi</button>
+                    <button type="button" onClick={() => void performAction("What can you do for me?", "Explaining assistant actions")}>What can you do?</button>
+                  </div>
                 </div>
               ) : messages.map((m, idx) => (
                 <div key={`${m.time}-${idx}`} className={`drawer-bubble role-${m.role}`}>
@@ -1671,26 +1927,18 @@ function App() {
               ))}
             </div>
 
+            {matchMessage && <p className="assistant-match-notice" role="status">{matchMessage}</p>}
+            {conversationFailed && (
+              <div className="assistant-recovery-panel" role="alert">
+                <p>The assistant could not return a response. Retry your question or browse the current catalog.</p>
+                <button type="button" onClick={() => void send(lastSubmittedText.current)}>Retry question</button>
+                <a href={`${publicWebsiteOrigin(bridgeParentOrigin.current)}/properties`} target="_top">Browse listings</a>
+              </div>
+            )}
             {matches.length === 0 && (
               <div className="conversation-empty-state" role="status">
-                {inventoryLoadState === "loading" ? (
-                  <p>Loading the company’s current property inventory…</p>
-                ) : inventoryLoadState === "error" ? (
-                  <>
-                    <p>Could not load live property inventory. Recommendations and visit requests are unavailable until it reconnects.</p>
-                    <button type="button" onClick={() => {
-                      setInventoryLoadState("loading");
-                      setInventoryRefreshKey((current) => current + 1);
-                    }}>Retry inventory</button>
-                  </>
-                ) : inventoryProperties.length === 0 ? (
-                  <>
-                    <p>No real company listings are loaded. The assistant will not invent properties; recommendations and visits need live inventory.</p>
-                    <button type="button" onClick={() => setShowLocations(true)}>Check inventory</button>
-                  </>
-                ) : (
-                  <p>No personalized recommendations yet. Ask the assistant to search the loaded listings.</p>
-                )}
+                <p>No suggestions yet. Ask for a fresh search or browse the current company listings. Only public listings with current availability can appear here.</p>
+                <a className="assistant-listing-link" href={`${publicWebsiteOrigin(bridgeParentOrigin.current)}/properties`} target="_top">Browse company listings</a>
               </div>
             )}
 
@@ -1701,38 +1949,41 @@ function App() {
                   const prop = propertyDetails[id];
                   const detailsLoading = loadingPropertyIds.includes(id);
                   const isCompared = comparedPropertyIds.includes(id);
+                  const listingHref = prop?.slug ? `${publicWebsiteOrigin(bridgeParentOrigin.current)}/properties/${encodeURIComponent(prop.slug)}` : null;
                   return (
                     <div key={id} className="drawer-property-item">
+                      {prop?.photos?.[0] ? (
+                        <img className="assistant-property-photo" src={prop.photos[0].url} alt={prop.photos[0].alt_text || `${prop.title} property photo`} loading="lazy" />
+                      ) : <div className="assistant-property-no-photo">No public photo is available</div>}
+                      <div className="assistant-property-content">
                       <div className="item-head">
-                        <span className="prop-id">{id}</span>
-                        <span className="prop-purpose">{prop?.purpose.toUpperCase() ?? (detailsLoading ? "LOADING" : "DETAILS UNAVAILABLE")}</span>
+                        <span className="prop-id">{prop?.publisher?.name || "Published listing"}</span>
+                        <span className="prop-purpose">{prop?.transaction_type?.toUpperCase() ?? (detailsLoading ? "LOADING" : "DETAILS UNAVAILABLE")}</span>
                       </div>
-                      <h4 className="prop-title">{prop?.title ?? (detailsLoading ? "Loading inventory details…" : `Property ${id}`)}</h4>
-                      <div className="prop-geo">{prop ? `${prop.area}, ${prop.city}` : "Inventory details unavailable"}</div>
-                      <div className="prop-price">{prop ? formatPricePKR(prop.price_pkr) : "—"}</div>
+                      <h4 className="prop-title">{prop?.title ?? (detailsLoading ? "Loading current listing…" : "Listing no longer available")}</h4>
+                      <div className="prop-geo">{prop ? `${prop.area}, ${prop.city}` : "This result could not be confirmed from the public catalog."}</div>
+                      <div className="prop-price">{prop ? `${formatPricePKR(prop.price_pkr)}${prop.transaction_type === "rent" ? ` / ${prop.rental_period || "period not confirmed"}` : ""}` : ""}</div>
                       {prop && (
                         <div className="prop-badges">
-                          <span className="unit-badge">{getMarlaEquivalent(prop.size_sqft)}</span>
+                          <span className="unit-badge">{reviewedSizeLabel(prop.size_sqft, prop.sqft_per_marla)}</span>
                           <span className={`availability-badge ${prop.available ? "available" : "unavailable"}`}>
-                            {availabilityLabel(prop.available)}
+                            {prop.available ? "Availability recently confirmed" : "Ask for current availability"}
                           </span>
                         </div>
                       )}
                       {prop && (
-                        <div className="prop-source">
-                          {inventorySourceLabel(prop.source, prop.source_version)}
-                        </div>
-                      )}
-                      {prop && (
                         <div className="prop-specs">
-                          <span>{prop.bedrooms > 0 ? `${prop.bedrooms} Bed` : "Commercial"}</span>
+                          <span>{prop.bedrooms > 0 ? `${prop.bedrooms} bed` : prop.property_type ?? "Commercial"}</span>
+                          {prop.bathrooms !== null && prop.bathrooms !== undefined && <><span>·</span><span>{prop.bathrooms} bath</span></>}
                           <span>•</span>
                           <span>{prop.size_sqft.toLocaleString()} sq ft</span>
-                          <span>•</span>
-                          <span>{prop.payment_plan}</span>
                         </div>
                       )}
+                      {prop?.verification?.status && prop.verification.status !== "not_reviewed" && prop.verification.scope && (
+                        <p className="assistant-verification-note">{prop.verification.scope}{prop.verification.reviewed_at ? ` · reviewed ${new Date(prop.verification.reviewed_at).toLocaleDateString("en-PK")}` : ""}</p>
+                      )}
                       <div className="prop-actions-row">
+                        {listingHref && <a className="assistant-listing-link" href={listingHref} target="_top">Full listing</a>}
                         <button
                           type="button"
                           className={`prop-compare-toggle ${isCompared ? "selected" : ""}`}
@@ -1750,16 +2001,27 @@ function App() {
                           onClick={() => openBookingFor(id)}
                           disabled={!canRequestVisit(prop)}
                         >
-                          {canRequestVisit(prop) ? "Request a visit" : "Unavailable"}
+                          {canRequestVisit(prop) ? "Request viewing" : "Viewing unavailable"}
                         </button>
+                      </div>
+                      {prop && <button className="assistant-inquiry-link" type="button" onClick={() => {
+                        setInquiryPropertyId(id);
+      setInquiryForm({ name: "", email: "", message: "", consent: false });
+                        setInquiryStatus("");
+                        inquiryDialog.current?.showModal();
+                      }}>Ask about this property</button>}
                       </div>
                     </div>
                   );
                 })}
               </div>
             )}
-            <div ref={chatBottomRef} />
           </div>
+          <form className="assistant-conversation-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
+            <label className="sr-only" htmlFor="assistant-message-input">Message Awaaz Estate</label>
+            <input id="assistant-message-input" ref={textInputRef} value={input} onChange={(event) => setInput(event.target.value)} maxLength={1000} placeholder="Ask about area, budget, listings, or a viewing…" />
+            <button type="submit" aria-label="Send message" disabled={!input.trim()}><Icon>{paths.send}</Icon><span>Send</span></button>
+          </form>
         </aside>
       )}
 
@@ -1838,8 +2100,6 @@ function App() {
         </dialog>
       )}
 
-      <AnalyticsPanel apiUrl={apiUrl} open={showAnalytics} onClose={() => setShowAnalytics(false)} />
-
       {/* Site Visit Booking Modal Dialog */}
       <dialog className="orbit-booking-dialog" ref={bookingDialog} aria-labelledby="booking-title">
         <div className="dialog-top-bar">
@@ -1853,7 +2113,7 @@ function App() {
         </div>
 
         <section className="dialog-body">
-          <p className="dialog-info">Submit a visit request for an available listing. Calendar confirmation is shown separately after the request is accepted.</p>
+          <p className="dialog-info">Choose a current company viewing slot and verify your email. Saving the reservation and delivering a Calendar or email notification are reported separately.</p>
           <div className="dialog-grid">
             <div className="field-block">
               <label>Selected Property</label>
@@ -1876,14 +2136,12 @@ function App() {
             </div>
 
             <div className="field-block">
-              <label>Requested visit time (Pakistan time)</label>
-              <input
-                aria-label="Requested visit date and time in Pakistan time"
-                type="datetime-local"
-                value={appointmentForm.starts_at}
-                onChange={(e) => setAppointmentForm({ ...appointmentForm, starts_at: e.target.value })}
-              />
-              <span className="visit-slot-hint">Monday–Saturday, 10:00–17:30 PKT; start times are every 30 minutes.</span>
+              <label htmlFor="assistant-viewing-slot">Available viewing slot (Pakistan time)</label>
+              <select id="assistant-viewing-slot" value={appointmentForm.starts_at} disabled={slotsLoading || viewingSlots.length === 0} onChange={(e) => setAppointmentForm({ ...appointmentForm, starts_at: e.target.value })}>
+                <option value="">{slotsLoading ? "Loading available slots…" : "Choose a slot"}</option>
+                {viewingSlots.map((slot) => <option key={slot} value={slot}>{new Intl.DateTimeFormat("en-PK", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Karachi" }).format(new Date(slot))} PKT</option>)}
+              </select>
+              <button type="button" className="assistant-inline-action" onClick={() => selectedPropertyId && void refreshViewingSlots(selectedPropertyId)}>Refresh slots</button>
             </div>
 
             <div className="field-block">
@@ -1903,8 +2161,18 @@ function App() {
                 type="email"
                 placeholder="e.g. client@example.com"
                 value={appointmentForm.contact_email}
-                onChange={(e) => setAppointmentForm({ ...appointmentForm, contact_email: e.target.value })}
+                onChange={(e) => {
+                  setAppointmentForm({ ...appointmentForm, contact_email: e.target.value });
+                  setViewingEmailVerified(false);
+                  setViewingVerificationToken("");
+                }}
               />
+              <button type="button" className="assistant-inline-action" onClick={() => void requestViewingOtp()} disabled={!appointmentForm.contact_email.trim() || viewingEmailVerified}>Send verification code</button>
+              <span className="assistant-inline-status" role="status">{viewingOtpMessage}</span>
+              <div className="assistant-otp-row">
+                <input aria-label="Email verification code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="6-digit code" value={viewingOtp} onChange={(event) => setViewingOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} disabled={viewingEmailVerified} />
+                <button type="button" className="assistant-inline-action" onClick={() => void verifyViewingOtp()} disabled={viewingOtp.length !== 6 || viewingEmailVerified}>Verify email</button>
+              </div>
             </div>
 
             <div className="field-block">
@@ -1931,11 +2199,27 @@ function App() {
             type="button"
             className="dialog-confirm-action"
             onClick={() => void bookVisit()}
-            disabled={!availableMatches.includes(selectedPropertyId) || !appointmentForm.client_name || !appointmentForm.contact_email || !appointmentForm.consent || Boolean(appointmentSlotError) || appointmentStatus === "Scheduling site visit…"}
+            disabled={!availableMatches.includes(selectedPropertyId) || !appointmentForm.client_name || !viewingEmailVerified || !appointmentForm.consent || Boolean(appointmentSlotError) || appointmentStatus === "Saving the viewing reservation…" || appointmentStatus.startsWith("Reservation saved (")}
           >
-            Send visit request
+            Reserve viewing
           </button>
           {appointmentStatus && <p className={`appointment-note tone-${appointmentTone}`} role="status">{appointmentStatus}</p>}
+        </section>
+      </dialog>
+
+      <dialog className="orbit-booking-dialog assistant-inquiry-dialog" ref={inquiryDialog} aria-labelledby="assistant-inquiry-title">
+        <div className="dialog-top-bar">
+          <div className="dialog-title-wrap"><Icon>{paths.home}</Icon><h2 id="assistant-inquiry-title">Ask about this property</h2></div>
+          <button type="button" className="dialog-x" onClick={() => inquiryDialog.current?.close()} aria-label="Close inquiry"><Icon>{paths.close}</Icon></button>
+        </div>
+        <section className="dialog-body">
+          <p className="dialog-info">A staff member can follow up using your chosen email. Your contact details are not added to the conversation text.</p>
+          <div className="field-block"><label htmlFor="inquiry-name">Your name</label><input id="inquiry-name" value={inquiryForm.name} onChange={(event) => setInquiryForm({ ...inquiryForm, name: event.target.value })} minLength={2} maxLength={100} autoComplete="name" /></div>
+          <div className="field-block"><label htmlFor="inquiry-email">Email address</label><input id="inquiry-email" type="email" autoComplete="email" value={inquiryForm.email} onChange={(event) => setInquiryForm({ ...inquiryForm, email: event.target.value })} /></div>
+          <div className="field-block"><label htmlFor="inquiry-message">Your question (optional)</label><textarea id="inquiry-message" maxLength={2000} value={inquiryForm.message} onChange={(event) => setInquiryForm({ ...inquiryForm, message: event.target.value })} /></div>
+          <label className="appointment-consent-field"><input type="checkbox" checked={inquiryForm.consent} onChange={(event) => setInquiryForm({ ...inquiryForm, consent: event.target.checked })} /><span>I consent to use my contact details to respond to this property inquiry.</span></label>
+          <button type="button" className="dialog-confirm-action" onClick={() => void submitPropertyInquiry()} disabled={!inquiryForm.name.trim() || !inquiryForm.email.trim() || !inquiryForm.consent || inquiryStatus === "Saving your inquiry…" || inquiryStatus.startsWith("Inquiry saved.")}>Send inquiry</button>
+          {inquiryStatus && <p className="appointment-note" role="status">{inquiryStatus}</p>}
         </section>
       </dialog>
 
@@ -1958,39 +2242,18 @@ function App() {
         />
       )}
 
-      {/* Inventory locations dialog */}
-      {showLocations && (
-        <PropertyLocations
-          properties={inventoryProperties}
-          apiUrl={apiUrl}
-          loadState={inventoryLoadState}
-          onRetry={() => {
-            setInventoryLoadState("loading");
-            setInventoryRefreshKey((current) => current + 1);
-          }}
-          onImportComplete={() => {
-            setInventoryLoadState("loading");
-            setInventoryRefreshKey((current) => current + 1);
-          }}
-          onClose={() => setShowLocations(false)}
-          onSelectProperty={(id) => {
-            setSelectedPropertyId(id);
-            const property = inventoryProperties.find((item) => item.id === id);
-            if (property) setPropertyDetails((current) => ({ ...current, [id]: property }));
-            setShowDrawer(true);
-          }}
-          onBook={(id) => {
-            setShowLocations(false);
-            openBookingFor(id);
-          }}
-        />
-      )}
-
       {/* Mortgage & Financing Calculator Modal */}
       {showMortgageCalc && (
         <MortgageCalculatorModal
-          property={propertyDetails[selectedPropertyId] || Object.values(propertyDetails)[0] || null}
-          onClose={() => setShowMortgageCalc(false)}
+          property={mortgageCustomProperty || propertyDetails[selectedPropertyId] || null}
+          initialDownPaymentPct={mortgageCustomDownPct}
+          initialTenureYears={mortgageCustomTenureYears}
+          onClose={() => {
+            setShowMortgageCalc(false);
+            setMortgageCustomProperty(null);
+            setMortgageCustomDownPct(undefined);
+            setMortgageCustomTenureYears(undefined);
+          }}
           onBookConsultation={(id) => {
             setShowMortgageCalc(false);
             if (id) openBookingFor(id);

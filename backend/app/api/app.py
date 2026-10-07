@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 
 import asyncio
 import base64
@@ -36,7 +37,11 @@ from app.agents.graph import EstateAgent
 from app.catalog.inquiries import public_router as public_inquiries_router
 from app.catalog.inquiries import staff_router as staff_inquiries_router
 from app.catalog.public import router as public_catalog_router
-from app.catalog.staff import router as staff_catalog_router
+from app.catalog.staff import (
+    router as staff_catalog_router,
+    staff_areas_router,
+    staff_viewings_router,
+)
 from app.core.config import settings
 from app.core.observability import TraceStore
 from app.domain.emotions import infer_acoustic_emotion
@@ -169,6 +174,8 @@ async def close_provider_router(router: object) -> None:
 
 
 app = FastAPI(title="Awaaz Estate API", version="0.1.0", lifespan=lifespan)
+from app.catalog.abuse import MarketplaceAbuseMiddleware
+app.add_middleware(MarketplaceAbuseMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -177,10 +184,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+from app.catalog.identity import router as identity_router
+from app.catalog.customers import router as customer_router, public as subscriptions_router
+app.include_router(customer_router)
+app.include_router(subscriptions_router)
+app.include_router(identity_router)
+from app.catalog.marketplace import agency as agency_router, platform as marketplace_staff_router
+from app.catalog.discovery import router as discovery_router
+app.include_router(agency_router)
+app.include_router(marketplace_staff_router)
+app.include_router(discovery_router)
 app.include_router(public_catalog_router)
 app.include_router(public_inquiries_router)
 app.include_router(staff_inquiries_router)
 app.include_router(staff_catalog_router)
+app.include_router(staff_viewings_router)
+app.include_router(staff_areas_router)
 
 
 class VoicePropertySummary(BaseModel):
@@ -272,6 +291,22 @@ if (frontend_dist / "assets").exists():
         StaticFiles(directory=frontend_dist / "assets"),
         name="assistant-assets",
     )
+
+media_dist = Path(__file__).resolve().parent.parent.parent / "media"
+media_dist.mkdir(parents=True, exist_ok=True)
+@app.get("/media/derivatives/{filename}")
+def approved_media(filename: str):
+    from app.repositories.records import PropertyMediaRecord, PropertyRecord
+    from app.repositories.listing_visibility import public_listing_conditions
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+\.webp",filename):
+        raise HTTPException(404,"Photo was not found")
+    from sqlalchemy import select
+    with SessionLocal() as session:
+        media=session.scalar(select(PropertyMediaRecord).join(PropertyRecord,PropertyMediaRecord.property_id==PropertyRecord.id).where(PropertyMediaRecord.public_url==f"/media/derivatives/{filename}",PropertyMediaRecord.is_public.is_(True),*public_listing_conditions()))
+        if not media:raise HTTPException(404,"Photo was not found")
+    path=media_dist / "derivatives" / filename
+    if not path.is_file():raise HTTPException(404,"Photo was not found")
+    return FileResponse(path,media_type="image/webp")
 
 SUPPORTED_VOICE_LANGUAGES = {"ur-Latn", "ur-Arab", "en", "hi", "ar", "pa", "bn"}
 OPENAI_STT_READINESS_CACHE_TTL_SECONDS = 30.0
@@ -406,11 +441,20 @@ def require_admin_api_key(x_admin_api_key: str | None = Header(default=None)) ->
         raise HTTPException(status_code=401, detail="Admin API key required")
 
 
+def _assistant_concierge_is_enabled() -> bool:
+    configured = settings.assistant_concierge_enabled
+    return settings.app_env == "development" if configured is None else configured
+
+
 @app.get("/")
 def root(request: Request) -> Response:
     index_file = frontend_dist / "index.html"
     accept = request.headers.get("accept", "")
-    if index_file.exists() and ("text/html" in accept or "application/json" not in accept):
+    if (
+        _assistant_concierge_is_enabled()
+        and index_file.exists()
+        and ("text/html" in accept or "application/json" not in accept)
+    ):
         return FileResponse(index_file)
     return JSONResponse(
         {
@@ -432,6 +476,11 @@ def assistant_redirect() -> Response:
 @app.get("/assistant/", include_in_schema=False)
 def assistant(request: Request) -> Response:
     """Serve the existing Vite voice experience under its stable website path."""
+    if not _assistant_concierge_is_enabled():
+        return JSONResponse(
+            {"detail": "Property assistance is not enabled in this environment"},
+            status_code=404,
+        )
     index_file = frontend_dist / "index.html"
     if index_file.exists():
         return FileResponse(index_file)
@@ -1416,6 +1465,10 @@ async def voice_socket(websocket: WebSocket):
         if emotion is not None:
             response_payload["emotion"] = emotion.as_dict()
         await send_turn(response_payload, turn_id)
+        if getattr(decision, "actions", None):
+            for act in decision.actions:
+                act_data = act.model_dump() if hasattr(act, "model_dump") else act
+                await send_turn({"type": "action_executed", "action": act_data}, turn_id)
         first_audio_recorded = False
         end_to_first_audio_recorded = False
         tts_started_at = time.perf_counter()

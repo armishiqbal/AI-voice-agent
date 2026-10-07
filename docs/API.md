@@ -123,3 +123,33 @@ lead record and emitted in the internal outbox event for operator follow-up sche
   closes. Transcript-store errors are measured without suppressing recovery audio. Unconfirmed
   text is never sent to the agent. Fish/MP3 output is rejected at this boundary; configure a PCM16
   TTS provider for phone calls.
+
+## Property marketplace
+
+The Next.js application calls FastAPI; it does not access the application database. The marketplace uses additive migrations `0025_area_guides_and_search_indexes` and `0026_marketplace`. Production migration and booking concurrency must be verified against PostgreSQL before a pilot.
+
+### Public discovery
+
+- `GET /v1/public/cities` — cities with at least one listing passing the public publication, approved-media and agency-visibility rules.
+- `GET /v1/public/locations?q=&city=` — reviewed canonical city/area labels and aliases for location suggestions.
+- `GET /v1/public/listings` and `GET /v1/public/listings/{slug}` — public catalog search and listing details.
+- `GET /v1/public/listings/by-id/{property_id}` — safe public DTO lookup for assistant results.
+- `GET /v1/public/listings/map?west=&east=&south=&north=&zoom=` — bounded approved-coordinate results. Requires `MAP_ENABLED=true`; it uses the same published-catalog filters and reports listings without public coordinates.
+- `GET /v1/public/areas` and `GET /v1/public/areas/{city_slug}/{area_slug}` — published, reviewed guides and their source links.
+- `GET /v1/public/agencies`, `/v1/public/agencies/{slug}`, `/v1/public/agents`, and `/v1/public/agents/{slug}` — approved public profiles only.
+
+### Sign-in and customer records
+
+- `POST /v1/auth/session` exchanges a verified Supabase provider access token for a short-lived, revocable HttpOnly application session and CSRF token. `GET /v1/auth/session`, `GET /v1/auth/csrf`, and `POST /v1/auth/logout` inspect, rotate protection state, and revoke the application session.
+- Staff and agency routes require an active backend role/membership and Supabase authenticator assurance `aal2`. Customer sessions are email verified. Protected writes require the CSRF token. Hiding a website control does not grant access.
+- With `CUSTOMER_FEATURES_ENABLED=true`, `/v1/me/favorites`, `/v1/me/searches`, and `/v1/me/viewings` expose only the signed-in user's records. Search email alerts require verified email and separately versioned consent; unsubscribe capabilities are opaque and expire through the notification lifecycle.
+
+### Agency workspace and platform moderation
+
+`/v1/agency/{organization_id}/` contains membership-scoped `listings`, listing revisions, availability and assignment, media upload, `inquiries`, `viewings`, `schedules`, and `members`. Agent permissions are further restricted to assigned records; management writes require an agency manager or administrator. `POST /viewings/{reference}/cancel` and `/reschedule` are authorized against the appointment's recorded agency/agent, write through the appointment service and outbox, and return external delivery as `pending` until provider confirmation.
+
+`/v1/staff/marketplace/` provides platform organization review, member invitations/status, listing revision review, private-media review, canonical locations, abuse reports and audit events. New listings begin as drafts; agency-submitted changes do not replace published content until staff accepts the proposed revision. Media stays private until processed and explicitly approved.
+
+### Release configuration and operations
+
+`MARKETPLACE_ENABLED`, `CUSTOMER_FEATURES_ENABLED`, and `MAP_ENABLED` default to false. Website map rendering also needs `NEXT_PUBLIC_MAP_ENABLED=true` plus a restricted MapTiler key. Supabase and storage credentials, SMTP and Calendar provider accounts, business contact details, legal review, PostgreSQL migration/concurrency evidence, backup restoration, and real agency-owned inventory remain staging/production prerequisites. Keep them disabled when those gates are incomplete. See [`website/README.md`](../website/README.md) for local commands, rollout checks and rollback guidance.

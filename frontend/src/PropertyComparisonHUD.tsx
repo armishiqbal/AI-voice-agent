@@ -1,5 +1,5 @@
 import React from "react";
-import { availabilityLabel, canRequestVisit, inventorySourceLabel } from "./propertyFacts.mjs";
+import { reviewedSizeLabel, availabilityLabel, canRequestVisit, inventorySourceLabel } from "./propertyFacts.mjs";
 import { useNativeDialog } from "./useNativeDialog";
 
 type Property = {
@@ -17,6 +17,8 @@ type Property = {
   available: boolean;
   source_version: string;
   source: string;
+  sqft_per_marla?: number | null;
+  slug?: string;
 };
 
 type PropertyComparisonHUDProps = {
@@ -37,11 +39,6 @@ function formatPricePKR(price: number): string {
   return `PKR ${price.toLocaleString()}`;
 }
 
-function getMarlaEquivalent(sqft: number): string {
-  return sqft >= 4_500
-    ? `${(sqft / 4_500).toFixed(1).replace(/\.0$/, "")} Kanal`
-    : `${(sqft / 225).toFixed(1).replace(/\.0$/, "")} Marla`;
-}
 
 function PropertyValue({ children }: { children: React.ReactNode }) {
   return <td className="feature-val">{children}</td>;
@@ -97,7 +94,7 @@ export function PropertyComparisonHUD({ properties, onClose, onBook }: PropertyC
               <tr>
                 <td className="feature-name">Size</td>
                 {properties.map((property) => (
-                  <PropertyValue key={property.id}>{property.size_sqft.toLocaleString()} sq ft · {getMarlaEquivalent(property.size_sqft)}</PropertyValue>
+                  <PropertyValue key={property.id}>{reviewedSizeLabel(property.size_sqft, property.sqft_per_marla)}</PropertyValue>
                 ))}
               </tr>
               <tr>
@@ -124,13 +121,13 @@ export function PropertyComparisonHUD({ properties, onClose, onBook }: PropertyC
                 <td className="feature-name">Inventory source</td>
                 {properties.map((property) => (
                   <PropertyValue key={property.id}>
-                    {inventorySourceLabel(property.source, property.source_version)}
+                    {property.slug ? "Published company listing" : inventorySourceLabel(property.source, property.source_version)}
                   </PropertyValue>
                 ))}
               </tr>
               <tr>
                 <td className="feature-name">Assigned employee</td>
-                {properties.map((property) => <PropertyValue key={property.id}>{property.assigned_employee || "Not assigned"}</PropertyValue>)}
+                {properties.map((property) => <PropertyValue key={property.id}>{property.slug ? "Company team" : property.assigned_employee || "Not assigned"}</PropertyValue>)}
               </tr>
               <tr>
                 <td className="feature-name">Visit request</td>
