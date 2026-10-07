@@ -1,11 +1,5 @@
 # Awaaz Estate — Multilingual AI Voice Agent & Luxury Real Estate Marketplace
 
-<p align="center">
-  <a href="https://github.com/haroonsh-dev"><img src="https://img.shields.io/badge/Lead%20Architect-haroonsh--dev-18523c?style=for-the-badge&logo=github&logoColor=white" alt="Lead Architect: haroonsh-dev" /></a>
-  <a href="https://github.com/haroonsh-dev"><img src="https://img.shields.io/badge/Maintainer-Haroon%20Shahid-0e3526?style=for-the-badge&logo=git&logoColor=white" alt="Maintained by Haroon Shahid" /></a>
-  <a href="https://github.com/armishiqbal/AI-voice-agent/actions"><img src="https://img.shields.io/github/actions/workflow/status/armishiqbal/AI-voice-agent/ci.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI%20Pipeline" alt="CI Pipeline" /></a>
-  <img src="https://img.shields.io/badge/AI%20Voice%20Agent-Autonomous%20%C2%B7%20Multimodal-18523c?style=for-the-badge&logo=openai&logoColor=white" alt="AI Voice Agent" />
-</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Next.js-15.5.24-black?style=flat-square&logo=next.js&logoColor=white" alt="Next.js" />
